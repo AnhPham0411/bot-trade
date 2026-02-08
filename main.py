@@ -106,7 +106,14 @@ def analyze(symbol):
         print(f"⚠️ Lỗi tính toán {symbol}: {e}")
 
 if __name__ == "__main__":
-    print(f"🕒 Chạy quét lúc: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    start_msg = f"🤖 Bot bắt đầu quét lúc: {datetime.now().strftime('%H:%M %d/%m')}"
+    print(start_msg)
+    # Thêm dòng này để test Telegram mỗi lần chạy
+    try:
+        send_telegram(start_msg) 
+    except:
+        pass
+
     for symbol in PAIRS:
         analyze(symbol)
         time.sleep(1) 
