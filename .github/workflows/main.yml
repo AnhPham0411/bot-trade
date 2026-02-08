@@ -2,9 +2,8 @@ name: H4 Trading Bot
 
 on:
   schedule:
-    # Chạy vào phút thứ 5 của mỗi khung 4 giờ (0h05, 4h05, 8h05...)
-    - cron: '5 0,4,8,12,16,20 * * *'
-  workflow_dispatch: # Cho phép bấm nút chạy tay để test
+    - cron: '5 0,4,8,12,16,20 * * *' # Chạy lúc 7h05, 11h05... VN
+  workflow_dispatch: # Cho phép bấm chạy tay
 
 jobs:
   run-bot:
@@ -19,11 +18,13 @@ jobs:
       with:
         python-version: '3.10'
 
-    - name: Install dependencies
+    - name: Install dependencies (Thủ công để tránh lỗi)
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
+        pip install ccxt pandas requests schedule
+        # Cài Numpy bản cũ trước
         pip install "numpy<2.0.0"
+        # Cài Pandas-TA bản Development từ link trực tiếp
         pip install https://github.com/twopirllc/pandas-ta/archive/development.zip
 
     - name: Run Trading Bot
@@ -32,4 +33,6 @@ jobs:
         BINANCE_SECRET_KEY: ${{ secrets.BINANCE_SECRET_KEY }}
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      # LƯU Ý: Đảm bảo file code của bạn tên là main.py
+      # Nếu file bạn tên là bot.py thì sửa dòng dưới thành: python bot.py
       run: python main.py
