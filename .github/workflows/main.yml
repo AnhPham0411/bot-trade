@@ -2,8 +2,11 @@ name: H4 Trading Bot
 
 on:
   schedule:
-    - cron: '5 0,4,8,12,16,20 * * *' # Chạy lúc 7h05, 11h05... VN
-  workflow_dispatch: # Cho phép bấm nút chạy tay để test
+    # Chạy vào phút thứ 5 của mỗi khung 4 giờ theo giờ UTC
+    # Giờ VN = Giờ UTC + 7
+    # 0h UTC = 7h sáng VN
+    - cron: '5 0,4,8,12,16,20 * * *'
+  workflow_dispatch: # Cho phép bấm nút chạy tay để test ngay lập tức
 
 jobs:
   run-bot:
@@ -21,16 +24,21 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install ccxt pandas requests schedule
         
-        # 1. Hạ cấp Numpy để tránh lỗi NaN
-        pip install "numpy<2.0.0"
-        
-        # 2. Hạ cấp Setuptools để tránh lỗi pkg_resources
+        # --- BƯỚC 1: Cài đặt môi trường nền (BẮT BUỘC) ---
+        # Phải cài Setuptools cũ trước để tránh lỗi pkg_resources
         pip install "setuptools<70.0.0"
         
-        # 3. Cài Pandas-TA bằng Git (Cách chuẩn nhất trên Linux)
+        # Phải ép dùng Numpy bản 1.x để tránh lỗi NaN
+        pip install "numpy<2.0.0"
+        
+        # --- BƯỚC 2: Cài thư viện chỉ báo ---
+        # Dùng lệnh git+ để lấy bản mới nhất từ tác giả (fix lỗi tốt nhất trên Linux)
         pip install git+https://github.com/twopirllc/pandas-ta.git@development
+        
+        # --- BƯỚC 3: Cài các thư viện phụ trợ ---
+        # Cài sau cùng để nó tự nhận diện Numpy đã có sẵn
+        pip install ccxt pandas requests schedule
 
     - name: Run Trading Bot
       env:
@@ -38,4 +46,7 @@ jobs:
         BINANCE_SECRET_KEY: ${{ secrets.BINANCE_SECRET_KEY }}
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      # LƯU Ý QUAN TRỌNG:
+      # Hãy đảm bảo file code bạn upload lên GitHub tên là main.py
+      # Nếu tên là bot.py thì sửa dòng dưới thành: python bot.py
       run: python main.py
