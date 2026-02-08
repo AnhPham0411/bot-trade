@@ -5,8 +5,7 @@ import requests
 import time
 from datetime import datetime
 
-# --- ĐOẠN MÃ ĐỒNG BỘ THƯ VIỆN (QUAN TRỌNG) ---
-# File YAML của bạn cài "pandas-ta-classic", nên code cần thử nhập đúng tên nó
+# --- KHAI BÁO THƯ VIỆN PANDAS-TA ---
 try:
     import pandas_ta as ta
     print("✅ Đã load thư viện: pandas_ta (Gốc)")
@@ -27,10 +26,12 @@ LIMIT = 200
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
-# Kết nối Binance chế độ Public (Không dùng API Key để tránh lỗi IP)
-exchange = ccxt.binance({
+# --- THAY ĐỔI QUAN TRỌNG: DÙNG MEXC THAY VÌ BINANCE ---
+# MEXC không chặn IP của GitHub Actions
+exchange = ccxt.mexc({
     'enableRateLimit': True,
-    'options': {'defaultType': 'future'}
+    # Chúng ta dùng giá Spot (Giao ngay) vì nó ổn định nhất trên GitHub
+    # Giá Spot và Future chênh nhau không đáng kể ở khung H4
 })
 
 def send_telegram(message):
@@ -46,6 +47,7 @@ def send_telegram(message):
 
 def fetch_data(symbol, tf):
     try:
+        # MEXC đôi khi cần đổi tên timeframe (4h -> 4h, nhưng 1d -> 1d vẫn ok)
         bars = exchange.fetch_ohlcv(symbol, tf, limit=LIMIT)
         df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         return df
@@ -72,13 +74,13 @@ def analyze(symbol):
         prev = df_h4.iloc[-2]
         d1_last = df_d1.iloc[-2]
 
-        # 2. Xác định Xu hướng
+        # 2. Xu hướng D1
         trend = 1 if d1_last['close'] > d1_last['ema50'] else -1
         
         signal = None
         sl = 0.0
         
-        # 3. Logic Vào Lệnh
+        # 3. Logic SMC
         if trend == 1: # UPTREND
             if curr['close'] > curr['ema20'] and curr['close'] > curr['open']:
                 if curr['close'] > prev['high']:
@@ -90,11 +92,11 @@ def analyze(symbol):
                     signal = "SELL"
                     sl = prev['swing_high'] + (curr['atr'] * 0.5)
                     
-        # 4. Thông báo
+        # 4. Gửi báo cáo
         if signal:
             risk = abs(curr['close'] - sl)
             tp = curr['close'] + (risk * 2) if signal == "BUY" else curr['close'] - (risk * 2)
-            msg = (f"🚀 TÍN HIỆU H4: {symbol} - {signal}\nGiá: {curr['close']}\nSL: {sl:.2f}\nTP: {tp:.2f}")
+            msg = (f"🚀 TÍN HIỆU H4 (MEXC Data): {symbol} - {signal}\nGiá: {curr['close']}\nSL: {sl:.2f}\nTP: {tp:.2f}")
             print(msg)
             send_telegram(msg)
         else:
@@ -107,5 +109,5 @@ if __name__ == "__main__":
     print(f"🕒 Chạy quét lúc: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     for symbol in PAIRS:
         analyze(symbol)
-        time.sleep(1) # Nghỉ 1 giây để tránh spam
+        time.sleep(1) 
     print("✅ Hoàn tất.")
