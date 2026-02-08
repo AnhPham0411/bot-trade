@@ -1,6 +1,10 @@
 import ccxt
 import pandas as pd
-import pandas_ta as ta
+try:
+    import pandas_ta as ta
+except ImportError:
+    # Nếu không tìm thấy bản gốc, thử import bản Classic
+    import pandas_ta_classic as ta
 import os
 import requests
 from datetime import datetime
