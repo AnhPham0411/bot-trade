@@ -3,118 +3,134 @@ import pandas as pd
 import os
 import requests
 import time
-from datetime import datetime
-
-# --- KHAI BÁO THƯ VIỆN PANDAS-TA ---
-try:
-    import pandas_ta as ta
-    print("✅ Đã load thư viện: pandas_ta (Gốc)")
-except ImportError:
-    try:
-        import pandas_ta_classic as ta
-        print("✅ Đã load thư viện: pandas_ta_classic")
-    except ImportError:
-        print("❌ LỖI: Không tìm thấy thư viện. Hãy kiểm tra lại file YAML.")
+from datetime import datetime, timezone
 
 # --- CẤU HÌNH ---
 PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT']
-TIMEFRAME = '4h'
-TREND_TF = '1d'
-LIMIT = 200
+TIMEFRAMES = ['1h', '4h'] 
 
-# Lấy Token Telegram
+# Cấu hình chiến thuật (Đánh nhanh thắng nhanh)
+RR_RATIO = 1.5       # Ăn 1.5 là chốt
+SL_LOOKBACK = 3      # Chỉ tìm đỉnh/đáy trong 3 nến gần nhất (SL ngắn)
+
+# Telegram
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
-# --- THAY ĐỔI QUAN TRỌNG: DÙNG MEXC THAY VÌ BINANCE ---
-# MEXC không chặn IP của GitHub Actions
-exchange = ccxt.mexc({
-    'enableRateLimit': True,
-    # Chúng ta dùng giá Spot (Giao ngay) vì nó ổn định nhất trên GitHub
-    # Giá Spot và Future chênh nhau không đáng kể ở khung H4
-})
+# Sàn MEXC (Không cần API Key để lấy giá)
+exchange = ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
 
-def send_telegram(message):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Chưa cấu hình Telegram")
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
+# Load thư viện
+try:
+    import pandas_ta as ta
+except ImportError:
     try:
-        requests.post(url, json=payload)
-    except Exception as e:
-        print(f"Lỗi gửi Telegram: {e}")
+        import pandas_ta_classic as ta
+    except: pass
 
-def fetch_data(symbol, tf):
+def send_telegram(msg):
+    if not TELEGRAM_TOKEN: return
     try:
-        # MEXC đôi khi cần đổi tên timeframe (4h -> 4h, nhưng 1d -> 1d vẫn ok)
-        bars = exchange.fetch_ohlcv(symbol, tf, limit=LIMIT)
-        df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg},
+            timeout=5
+        )
+    except: pass
+
+def get_data(symbol, tf):
+    try:
+        # Lấy 100 nến là đủ tính toán, nhẹ server
+        bars = exchange.fetch_ohlcv(symbol, tf, limit=100)
+        df = pd.DataFrame(bars, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+        df['ts'] = pd.to_datetime(df['ts'], unit='ms')
         return df
-    except Exception as e:
-        print(f"❌ Lỗi tải {symbol}: {e}")
-        return None
+    except: return None
 
-def analyze(symbol):
-    df_d1 = fetch_data(symbol, TREND_TF)
-    df_h4 = fetch_data(symbol, TIMEFRAME)
-    
-    if df_d1 is None or df_h4 is None: return
+def analyze(symbol, tf):
+    # --- LOGIC CHẠY THEO GIỜ (QUAN TRỌNG) ---
+    # H1: Chạy mỗi tiếng.
+    # H4: Chỉ chạy khi giờ UTC chia hết cho 4 (0, 4, 8, 12...)
+    # Tương ứng giờ VN: 7h, 11h, 15h, 19h...
+    current_hour_utc = datetime.now(timezone.utc).hour
+    if tf == '4h' and current_hour_utc % 4 != 0:
+        return 
 
-    try:
-        # 1. Tính toán Indicator
-        df_d1['ema50'] = df_d1.ta.ema(length=50)
-        
-        df_h4['ema20'] = df_h4.ta.ema(length=20)
-        df_h4['atr'] = df_h4.ta.atr(length=14)
-        df_h4['swing_low'] = df_h4['low'].rolling(10).min()
-        df_h4['swing_high'] = df_h4['high'].rolling(10).max()
-        
-        curr = df_h4.iloc[-1]
-        prev = df_h4.iloc[-2]
-        d1_last = df_d1.iloc[-2]
+    df = get_data(symbol, tf)
+    if df is None: return
 
-        # 2. Xu hướng D1
-        trend = 1 if d1_last['close'] > d1_last['ema50'] else -1
-        
-        signal = None
-        sl = 0.0
-        
-        # 3. Logic SMC
-        if trend == 1: # UPTREND
-            if curr['close'] > curr['ema20'] and curr['close'] > curr['open']:
-                if curr['close'] > prev['high']:
-                    signal = "BUY"
-                    sl = prev['swing_low'] - (curr['atr'] * 0.5)
-        elif trend == -1: # DOWN
-            if curr['close'] < curr['ema20'] and curr['close'] < curr['open']:
-                if curr['close'] < prev['low']:
-                    signal = "SELL"
-                    sl = prev['swing_high'] + (curr['atr'] * 0.5)
-                    
-        # 4. Gửi báo cáo
-        if signal:
-            risk = abs(curr['close'] - sl)
-            tp = curr['close'] + (risk * 2) if signal == "BUY" else curr['close'] - (risk * 2)
-            msg = (f"🚀 TÍN HIỆU H4 (MEXC Data): {symbol} - {signal}\nGiá: {curr['close']}\nSL: {sl:.2f}\nTP: {tp:.2f}")
-            print(msg)
-            send_telegram(msg)
-        else:
-            print(f"{symbol}: Waiting... (Trend {'UP' if trend==1 else 'DOWN'})")
+    # --- INDICATOR ---
+    df['ema_trend'] = df.ta.ema(length=34) # Xu hướng chính
+    df['ema_fast'] = df.ta.ema(length=13)  # Xu hướng ngắn
+    df['atr'] = df.ta.atr(length=14)
 
-    except Exception as e:
-        print(f"⚠️ Lỗi tính toán {symbol}: {e}")
+    # --- QUAN TRỌNG: Dùng iloc[-2] là nến VỪA ĐÓNG CỬA ---
+    # Tuyệt đối không dùng iloc[-1] (nến đang chạy)
+    c = df.iloc[-2] 
+    p = df.iloc[-3] 
+
+    # Tìm SL ngắn: Đỉnh/Đáy trong 3 nến gần nhất
+    recent_low = df['low'].iloc[-4:-1].min()
+    recent_high = df['high'].iloc[-4:-1].max()
+
+    signal = None
+    sl_price = 0.0
+
+    # --- LOGIC TÍN HIỆU ---
+    # BUY: Giá trên EMA Trend + Giá trên EMA Fast + Break đỉnh nến trước
+    if c['close'] > c['ema_trend']:
+        if c['close'] > c['ema_fast'] and c['close'] > c['open']:
+            if c['close'] > p['high']:
+                signal = "BUY"
+                sl_price = recent_low - (c['atr'] * 0.1) # Trừ 1 xíu spread
+
+    # SELL: Giá dưới EMA Trend + Giá dưới EMA Fast + Break đáy nến trước
+    elif c['close'] < c['ema_trend']:
+        if c['close'] < c['ema_fast'] and c['close'] < c['open']:
+            if c['close'] < p['low']:
+                signal = "SELL"
+                sl_price = recent_high + (c['atr'] * 0.1) # Cộng 1 xíu spread
+
+    # --- TÍNH TP/SL & GỬI TIN ---
+    if signal:
+        entry = c['close']
+        risk = abs(entry - sl_price)
+        
+        # SL tối thiểu = 20% cây ATR (để không bị quét râu quá ngắn)
+        min_risk = c['atr'] * 0.2
+        if risk < min_risk: risk = min_risk
+        
+        # Recalculate SL chuẩn
+        sl_price = entry - risk if signal == "BUY" else entry + risk
+        
+        # TP theo tỷ lệ R:R
+        tp_price = entry + (risk * RR_RATIO) if signal == "BUY" else entry - (risk * RR_RATIO)
+
+        # Icon
+        icon = "🟢 LONG" if signal == "BUY" else "🔴 SHORT"
+        
+        # Nội dung tin nhắn (Làm tròn 2 số cho ngắn)
+        msg = (
+            f"{icon} #{symbol} ({tf})\n"
+            f"Entry: {entry:.2f}\n"
+            f"SL: {sl_price:.2f}\n"
+            f"TP: {tp_price:.2f}\n"
+            f"R:R: {RR_RATIO}"
+        )
+        print(msg)
+        send_telegram(msg)
+    else:
+        print(f"⏳ {symbol} {tf}: Không có tín hiệu")
 
 if __name__ == "__main__":
-    start_msg = f"🤖 Bot bắt đầu quét lúc: {datetime.now().strftime('%H:%M %d/%m')}"
-    print(start_msg)
-    # Thêm dòng này để test Telegram mỗi lần chạy
-    try:
-        send_telegram(start_msg) 
-    except:
-        pass
+    print(f"--- Scan: {datetime.now().strftime('%H:%M')} ---")
+    
+    # Test telegram khi khởi động (bỏ comment nếu muốn test)
+    # send_telegram("🤖 Bot started scanning...")
 
     for symbol in PAIRS:
-        analyze(symbol)
-        time.sleep(1) 
+        for tf in TIMEFRAMES:
+            analyze(symbol, tf)
+            time.sleep(0.5) # Nghỉ nhẹ để không bị ban IP
+    
     print("✅ Hoàn tất.")
