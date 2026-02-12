@@ -5,7 +5,7 @@ on:
     # Chạy vào phút thứ 5 của mỗi giờ
     - cron: '5 * * * *'
   
-  workflow_dispatch: # Nút chạy tay để test
+  workflow_dispatch: # Nút chạy tay
 
 jobs:
   run-bot:
@@ -24,13 +24,9 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         
-        # 1. Cài các thư viện cơ bản
-        pip install ccxt pandas requests
+        # CHỈ CẦN 3 THƯ VIỆN NÀY LÀ ĐỦ (Xóa hết pandas-ta)
+        pip install ccxt pandas requests numpy
         
-        # 2. Cài thư viện pandas-ta-classic (Bản này chạy ổn định nhất)
-        # Link này chứa bản fix lỗi Numpy rồi, cài là chạy ngay
-        pip install git+https://github.com/xgboosted/pandas-ta-classic.git
-
     - name: Run Trading Bot
       env:
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
