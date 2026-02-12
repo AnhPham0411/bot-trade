@@ -2,13 +2,13 @@ name: Crypto Bot H1-H4
 
 on:
   schedule:
-    # --- QUAN TRỌNG ---
-    # Chạy vào phút thứ 5 của TẤT CẢ các giờ (0h05, 1h05, 2h05...)
-    # Để bot bắt được nến H1 mỗi tiếng.
-    # Code Python sẽ tự động biết giờ nào cần chạy thêm H4.
+    # Chạy vào phút thứ 5 của mỗi giờ (0:05, 1:05, 2:05...)
+    # Logic: 
+    # - H1: Chạy mỗi lần trigger
+    # - H4: Python sẽ tự lọc chỉ chạy vào 0h, 4h, 8h...
     - cron: '5 * * * *'
-    
-  workflow_dispatch: # Cho phép bấm nút chạy tay để test
+  
+  workflow_dispatch: # Nút chạy tay để test
 
 jobs:
   run-bot:
@@ -27,15 +27,17 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         
-        # 1. Cài các thư viện cơ bản (Bỏ 'schedule')
-        pip install ccxt pandas requests
+        # 1. Cài setuptools (Bắt buộc để build thư viện tài chính)
+        pip install setuptools wheel
         
-        # 2. Cài thư viện pandas-ta-classic (Fix lỗi Numpy 2.0)
-        pip install git+https://github.com/xgboosted/pandas-ta-classic.git
+        # 2. Fix lỗi Numpy 2.0 (Quan trọng: pandas_ta chưa hỗ trợ numpy 2.0)
+        pip install "numpy<2.0"
+        
+        # 3. Cài các thư viện chính
+        pip install ccxt pandas requests pandas_ta
 
     - name: Run Trading Bot
       env:
-        # Chỉ cần Token Telegram, không cần API Key sàn vì lấy giá Public
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: python main.py
