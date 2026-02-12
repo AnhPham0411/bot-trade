@@ -7,13 +7,12 @@ import time
 from datetime import datetime, timezone
 
 # --- CẤU HÌNH ---
-PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT', 'DOGE/USDT']
+PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT', 'DOGE/USDT', 'ADA/USDT']
 TIMEFRAMES = ['1h', '4h'] 
 
 # Telegram
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 env_chat_id = os.getenv('TELEGRAM_CHAT_ID')
-
 CHAT_IDS = ['-5103508011'] 
 if env_chat_id:
     CHAT_IDS.append(env_chat_id)
@@ -23,6 +22,9 @@ exchange = ccxt.mexc({
     'enableRateLimit': True, 
     'options': {'defaultType': 'spot'}
 })
+
+# Biến lưu trữ báo cáo cuối giờ
+REPORT_DATA = []
 
 # ==========================================
 # PHẦN 1: HÀM TÍNH TOÁN (KHÔNG CẦN PANDAS-TA)
@@ -52,6 +54,9 @@ def calculate_macd(series, fast=12, slow=26, signal=9):
     ema_fast = calculate_ema(series, fast)
     ema_slow = calculate_ema(series, slow)
     macd_line = ema_fast - ema_slow
+    # signal_line = calculate_ema(macd_line, signal) # Không cần dùng signal line ở đây
+    # hist = macd_line - signal_line
+    # Lưu ý: Code gốc logic tính hist cần signal line, sửa lại cho đúng chuẩn:
     signal_line = calculate_ema(macd_line, signal)
     hist = macd_line - signal_line
     return hist
@@ -67,7 +72,6 @@ def calculate_supertrend(df, length=10, multiplier=3):
     supertrend = [0.0] * len(df)
     direction = [1] * len(df) # 1: Tăng, -1: Giảm
     
-    # Logic Supertrend
     close = df['close'].values
     
     for i in range(1, len(df)):
@@ -135,7 +139,7 @@ def analyze(symbol, tf):
     df = get_data(symbol, tf)
     if df is None: return
 
-    # --- TÍNH TOÁN INDICATOR (Dùng hàm tự viết) ---
+    # --- TÍNH TOÁN INDICATOR ---
     df['ema_200'] = calculate_ema(df['close'], 200)
     df['rsi'] = calculate_rsi(df['close'], 14)
     df['atr'] = calculate_atr(df, 14)
@@ -145,23 +149,21 @@ def analyze(symbol, tf):
     df['st_val'] = st_val
     df['st_dir'] = st_dir
 
-    # Nến tín hiệu
-    c = df.iloc[-2] 
+    c = df.iloc[-2] # Nến đóng cửa
     p = df.iloc[-3] 
 
+    # --- 1. LOGIC TÌM ĐIỂM VÀO LỆNH (ENTRY) ---
     signal = None
     sl_price = 0.0
     tp_price = 0.0
     
-    # --- LỌC NẾN ---
     body_size = abs(c['close'] - c['open'])
     full_size = c['high'] - c['low']
     is_strong_candle = body_size > (full_size * 0.5)
 
-    # --- LOGIC MUA/BÁN ---
     # LONG
     if c['close'] > c['ema_200']:
-        if c['st_dir'] == 1 and p['st_dir'] == -1: # Đổi màu
+        if c['st_dir'] == 1 and p['st_dir'] == -1: # Vừa đổi màu Xanh
             if c['macd_hist'] > 0:
                 if is_strong_candle and c['rsi'] < 70:
                     signal = "BUY"
@@ -172,7 +174,7 @@ def analyze(symbol, tf):
 
     # SHORT
     elif c['close'] < c['ema_200']:
-        if c['st_dir'] == -1 and p['st_dir'] == 1: # Đổi màu
+        if c['st_dir'] == -1 and p['st_dir'] == 1: # Vừa đổi màu Đỏ
             if c['macd_hist'] < 0:
                 if is_strong_candle and c['rsi'] > 30:
                     signal = "SELL"
@@ -181,31 +183,63 @@ def analyze(symbol, tf):
                     min_reward = c['atr'] * 2
                     tp_price = c['close'] - max(risk * 1.5, min_reward)
 
-    # --- GỬI TIN NHẮN ---
+    # Gửi tin nhắn ENTRY
     if signal:
         entry = c['close']
         rr = abs(tp_price - entry) / abs(entry - sl_price) if abs(entry - sl_price) > 0 else 0
         
-        icon = "🚀 LONG MẠNH" if signal == "BUY" else "📉 SHORT MẠNH"
+        icon = "🚀 LONG MỚI" if signal == "BUY" else "📉 SHORT MỚI"
         msg = (
             f"{icon} #{symbol} ({tf})\n"
             f"Entry: {entry:.4f}\n"
             f"SL: {sl_price:.4f}\n"
             f"TP: {tp_price:.4f}\n"
-            f"R:R: {rr:.2f}\n"
-            f"--- No-Lib Mode ---"
+            f"R:R: {rr:.2f}"
         )
         print(f"\n🔥 {msg}")
         send_telegram(msg)
-    else:
-        trend = "Tăng" if c['close'] > c['ema_200'] else "Giảm"
-        st = "Xanh" if c['st_dir'] == 1 else "Đỏ"
-        print(f"✅ {symbol} {tf}: Wait... (Price:{c['close']:.2f} | Trend:{trend} | ST:{st})    ")
+
+    # --- 2. LOGIC TỔNG HỢP XU HƯỚNG (REPORT) ---
+    # Xác định xu hướng hiện tại của cặp này để báo cáo cuối cùng
+    trend_status = "Sideway"
+    icon_status = "🟡" # Mặc định Sideway
+    
+    if c['close'] > c['ema_200'] and c['st_dir'] == 1:
+        if c['macd_hist'] > 0:
+            trend_status = "Tăng Mạnh"
+            icon_status = "🟢"
+        else:
+            trend_status = "Tăng (Yếu)"
+            icon_status = "⚪"
+            
+    elif c['close'] < c['ema_200'] and c['st_dir'] == -1:
+        if c['macd_hist'] < 0:
+            trend_status = "Giảm Mạnh"
+            icon_status = "🔴"
+        else:
+            trend_status = "Giảm (Yếu)"
+            icon_status = "⚪"
+
+    # Thêm vào danh sách báo cáo
+    REPORT_DATA.append(f"{icon_status} {symbol} ({tf}): {trend_status}")
+
 
 if __name__ == "__main__":
     print(f"\n--- BOT START (NO-LIB): {datetime.now().strftime('%H:%M')} ---")
+    
+    # Reset Report
+    REPORT_DATA = []
+    
     for symbol in PAIRS:
         for tf in TIMEFRAMES:
             analyze(symbol, tf)
             time.sleep(1)
+            
+    # --- GỬI BÁO CÁO TỔNG KẾT ---
+    if REPORT_DATA:
+        summary = "📊 MARKET SUMMARY:\n" + "\n".join(REPORT_DATA)
+        print(f"\n{summary}")
+        # Gửi summary
+        send_telegram(summary)
+        
     print("\n🏁 Done.")
