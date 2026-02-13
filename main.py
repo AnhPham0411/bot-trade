@@ -3,47 +3,38 @@ import numpy as np
 import os
 import requests
 import time
-import ccxt  # Đã thêm import ccxt
+import ccxt
 from datetime import datetime, timezone
 
 # ==========================================
-# --- CẤU HÌNH ---
+# --- 1. CẤU HÌNH (CONFIGURATION) ---
 # ==========================================
-# Chỉ chạy 4 coin theo yêu cầu
 PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT']
-TIMEFRAMES = ['15m', '1h', '4h'] # Thêm 15m để bắt entry SMC chuẩn hơn
+TIMEFRAMES = ['15m', '1h', '4h'] 
 
-# Telegram Config
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN') 
-# Nếu bạn chạy local, hãy thay trực tiếp token vào đây: "123456:ABC-DEF..."
-CHAT_IDS = ['-5103508011'] # Thay ID nhóm của bạn vào đây
+# Telegram Config (Lấy từ biến môi trường Github Actions)
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+CHAT_IDS = [os.getenv('TELEGRAM_CHAT_ID')] 
 
-# Kết nối sàn MEXC
+# Kết nối sàn MEXC (Hoặc Binance/Bybit tùy ý)
 exchange = ccxt.mexc({
     'enableRateLimit': True, 
     'options': {'defaultType': 'spot'}
 })
 
-# Biến lưu trữ báo cáo
-REPORT_DATA = []
+# Biến toàn cục lưu trữ báo cáo cuối giờ
+SUMMARY_REPORT = []
 
 # ==========================================
-# PHẦN 1: HÀM TÍNH TOÁN CƠ BẢN
+# --- 2. HÀM TÍNH TOÁN INDICATOR ---
 # ==========================================
 
 def calculate_ema(series, length):
+    """Tính đường trung bình lũy thừa (EMA)"""
     return series.ewm(span=length, adjust=False).mean()
 
-def calculate_rsi(series, length=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).fillna(0)
-    loss = (-delta.where(delta < 0, 0)).fillna(0)
-    avg_gain = gain.ewm(com=length-1, min_periods=length).mean()
-    avg_loss = loss.ewm(com=length-1, min_periods=length).mean()
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
 def calculate_atr(df, length=14):
+    """Tính độ biến động trung bình (ATR) để đặt SL/TP"""
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
@@ -51,165 +42,192 @@ def calculate_atr(df, length=14):
     true_range = np.max(ranges, axis=1)
     return true_range.rolling(window=length).mean()
 
-# Hàm tìm Pivot (Đỉnh/Đáy) để xác định OB và BOS
-def find_pivots(df, window=5):
-    # Pivot High: Đỉnh cao nhất trong window nến trái và phải
-    df['pivot_high'] = df['high'].rolling(window=window*2+1, center=True).max()
-    df['is_pivot_high'] = (df['high'] == df['pivot_high'])
-    
-    # Pivot Low: Đáy thấp nhất trong window nến trái và phải
-    df['pivot_low'] = df['low'].rolling(window=window*2+1, center=True).min()
-    df['is_pivot_low'] = (df['low'] == df['pivot_low'])
+def find_swings(df, window=5):
+    """Tìm đỉnh (Swing High) và đáy (Swing Low)"""
+    df['swing_high'] = df['high'].rolling(window=window*2+1, center=True).max()
+    df['swing_low'] = df['low'].rolling(window=window*2+1, center=True).min()
+    df['is_high'] = (df['high'] == df['swing_high'])
+    df['is_low'] = (df['low'] == df['swing_low'])
     return df
 
 # ==========================================
-# PHẦN 2: LOGIC SMC (OB, BOS, FVG)
+# --- 3. LOGIC SMC "SNIPER" (CORE) ---
 # ==========================================
 
-def check_smc_strategy(df):
+def check_sniper_setup(df):
     """
-    Hàm này kiểm tra 3 điều kiện SMC: OB, BOS, FVG
-    Trả về: Signal (BUY/SELL), Type (OB/BOS/FVG), Entry, SL, TP
+    Logic tìm điểm vào lệnh dựa trên nến ĐÃ ĐÓNG CỬA (iloc[-2]).
+    Điều này giúp bot chạy ổn định trên Github Actions, không bị vẽ lại (repaint).
     """
-    # Lấy dữ liệu nến hiện tại và quá khứ
-    curr = df.iloc[-1]
-    prev = df.iloc[-2]
+    # Lấy nến vừa đóng cửa (Confirmed Candle)
+    curr = df.iloc[-2] 
+    prev = df.iloc[-3]
     
-    # --- 1. CHIẾN LƯỢC BREAK OF STRUCTURE (BOS) ---
-    # Logic: Giá đóng cửa phá vỡ đỉnh/đáy gần nhất (Swing High/Low trong 20 nến)
-    # Tìm Swing High/Low gần nhất (không tính nến hiện tại)
-    recent_high = df['high'].iloc[-20:-1].max()
-    recent_low = df['low'].iloc[-20:-1].min()
+    # Xác định xu hướng hiện tại
+    ema_200 = df['ema_200'].iloc[-2]
+    trend_txt = "🟢 UP" if curr['close'] > ema_200 else "🔴 DOWN"
     
-    # BOS BULLISH (Phá đỉnh cũ)
-    if prev['close'] < recent_high and curr['close'] > recent_high:
-        if curr['vol'] > df['vol'].iloc[-20:].mean() * 1.5: # Volume spike
-            sl = curr['low']
-            tp = curr['close'] + (curr['close'] - sl) * 3 # RR 1:3
-            return "BUY", "BOS Breakout", curr['close'], sl, tp
+    signal = None
+    strat_name = ""
+    entry = 0
+    sl = 0
+    tp = 0
 
-    # BOS BEARISH (Phá đáy cũ)
-    if prev['close'] > recent_low and curr['close'] < recent_low:
-        if curr['vol'] > df['vol'].iloc[-20:].mean() * 1.5:
-            sl = curr['high']
-            tp = curr['close'] - (sl - curr['close']) * 3
-            return "SELL", "BOS Breakout", curr['close'], sl, tp
-
-    # --- 2. CHIẾN LƯỢC FAIR VALUE GAP (FVG) ---
-    # FVG Bullish: High[i-2] < Low[i] (Có khoảng trống giá ở giữa)
-    # Kiểm tra FVG được tạo ra ở nến CÁCH ĐÂY 1-2 phiên và giá hiện tại đang fill
-    # Đơn giản hóa: Check nến i-1 là nến mạnh tạo FVG, nến i (curr) đang nhúng vào
-    candle_gap_bull = df.iloc[-3]['high']
-    candle_post_gap_bull = df.iloc[-1]['low'] # Giá thấp nhất hiện tại
-    
-    # Nếu có Gap tăng giá (Nến -2 tăng mạnh, để lại gap với nến -3)
-    # Và giá hiện tại (nến -1) đang retest vùng gap đó
-    if df.iloc[-2]['low'] > df.iloc[-4]['high']: # Xác nhận có FVG tăng ở nến trước
-        fvg_zone_top = df.iloc[-2]['low']
-        fvg_zone_bot = df.iloc[-4]['high']
-        # Nếu giá hiện tại nhúng vào vùng này
-        if fvg_zone_bot < curr['close'] < fvg_zone_top:
-             sl = fvg_zone_bot * 0.995 # SL dưới FVG
-             tp = curr['close'] * 1.02 # TP 2%
-             return "BUY", "FVG Retest", curr['close'], sl, tp
-
-    # --- 3. CHIẾN LƯỢC ORDER BLOCK (OB) ---
-    # OB Bullish: Vùng giá thấp nhất (Pivot Low) trước đó, giờ giá quay lại test
-    # Tìm Pivot Low gần nhất
-    last_pivots = df[df['is_pivot_low'] == True].iloc[-5:] # 5 pivot gần nhất
-    if not last_pivots.empty:
-        ob_candle = last_pivots.iloc[-1] # Lấy OB gần nhất
-        ob_low = ob_candle['low']
-        ob_high = ob_candle['high']
+    # --- SETUP BUY (LONG) ---
+    # Điều kiện: Giá nằm trên EMA 200 (Uptrend)
+    if curr['close'] > ema_200:
+        # Tìm vùng giá (Swing) gần nhất trong 60 nến quá khứ
+        recent_data = df.iloc[-60:-2] 
+        last_low = recent_data[recent_data['is_low'] == True]['low'].min()
+        last_high = recent_data[recent_data['is_high'] == True]['high'].max()
         
-        # Điều kiện: Giá hiện tại chạm vùng OB này (Retest)
-        # Và OB này phải thấp hơn giá hiện tại (đang trong uptrend hoặc pullback)
-        if ob_low <= curr['low'] <= ob_high: 
-            # Confirmation: Nến hiện tại rút chân (Pinbar) hoặc xanh
-            if curr['close'] > curr['open']: 
-                sl = ob_low * 0.99 # SL dưới OB 1%
-                tp = curr['close'] + (curr['close'] - sl) * 2 # RR 1:2
-                return "BUY", "Order Block Test", curr['close'], sl, tp
+        # Nếu cấu trúc thị trường rõ ràng
+        if not pd.isna(last_low) and not pd.isna(last_high) and last_high > last_low:
+            # Vùng Discount (Giá rẻ): Dưới mức 50% của đợt tăng giá
+            fibo_05 = last_low + 0.5 * (last_high - last_low)
+            
+            # Nếu giá thấp nhất của nến tín hiệu chạm vào vùng Discount
+            if curr['low'] <= fibo_05:
+                # Trigger 1: Pinbar Bullish (Rút chân dưới dài)
+                body = abs(curr['close'] - curr['open'])
+                lower_wick = min(curr['close'], curr['open']) - curr['low']
+                is_pinbar = lower_wick > (body * 2)
+                
+                # Trigger 2: Engulfing Bullish (Nhấn chìm tăng)
+                is_engulfing = (curr['close'] > prev['open']) and (curr['open'] < prev['close'])
+                
+                if is_pinbar or is_engulfing:
+                    signal = "BUY"
+                    strat_name = "Pullback Discount"
+                    entry = curr['close']
+                    sl = min(curr['low'], last_low) * 0.995 # SL dưới đáy nến hoặc đáy cũ 0.5%
+                    tp = last_high # TP về đỉnh cũ
 
-    return None, None, 0, 0, 0
+    # --- SETUP SELL (SHORT) ---
+    # Điều kiện: Giá nằm dưới EMA 200 (Downtrend)
+    elif curr['close'] < ema_200:
+        recent_data = df.iloc[-60:-2]
+        last_low = recent_data[recent_data['is_low'] == True]['low'].min()
+        last_high = recent_data[recent_data['is_high'] == True]['high'].max()
+        
+        if not pd.isna(last_low) and not pd.isna(last_high) and last_high > last_low:
+            # Vùng Premium (Giá đắt): Trên mức 50% của đợt giảm giá
+            fibo_05 = last_low + 0.5 * (last_high - last_low)
+            
+            if curr['high'] >= fibo_05:
+                # Trigger 1: Pinbar Bearish (Rút chân trên dài)
+                body = abs(curr['close'] - curr['open'])
+                upper_wick = curr['high'] - max(curr['close'], curr['open'])
+                is_pinbar = upper_wick > (body * 2)
+                
+                # Trigger 2: Engulfing Bearish (Nhấn chìm giảm)
+                is_engulfing = (curr['close'] < prev['open']) and (curr['open'] > prev['close'])
+                
+                if is_pinbar or is_engulfing:
+                    signal = "SELL"
+                    strat_name = "Pullback Premium"
+                    entry = curr['close']
+                    sl = max(curr['high'], last_high) * 1.005 # SL trên đỉnh nến hoặc đỉnh cũ 0.5%
+                    tp = last_low # TP về đáy cũ
+
+    return signal, strat_name, entry, sl, tp, trend_txt
 
 # ==========================================
-# PHẦN 3: LOGIC CHÍNH & GỬI TIN
+# --- 4. HÀM GỬI TELEGRAM & XỬ LÝ ---
 # ==========================================
 
 def send_telegram(msg):
+    """Gửi tin nhắn đến Telegram"""
     if not TELEGRAM_TOKEN: return
-    for chat_id in CHAT_IDS:
+    # Lọc ID trùng lặp và rỗng
+    unique_ids = list(set(filter(None, CHAT_IDS)))
+    for chat_id in unique_ids:
         try:
             requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                json={"chat_id": chat_id, "text": msg},
+                json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"},
                 timeout=5
             )
         except Exception as e:
             print(f"❌ Lỗi gửi tele: {e}")
 
-def get_data(symbol, tf):
+def analyze(symbol, tf):
+    """Phân tích 1 cặp tiền trên 1 khung thời gian"""
+    print(f"🔎 Scanning: {symbol} ({tf})...", end="\r")
+    
     try:
-        bars = exchange.fetch_ohlcv(symbol, tf, limit=100) # Lấy 100 nến
+        # Lấy 500 nến để tính EMA và tìm đỉnh đáy chuẩn
+        bars = exchange.fetch_ohlcv(symbol, tf, limit=500)
         df = pd.DataFrame(bars, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
         df['ts'] = pd.to_datetime(df['ts'], unit='ms')
-        return df
     except Exception as e:
-        print(f"❌ Lỗi data {symbol}: {e}")
-        return None
+        print(f"❌ Error getting data for {symbol}: {e}")
+        SUMMARY_REPORT.append(f"⚠️ {symbol} ({tf}): Lỗi Data")
+        return
 
-def analyze(symbol, tf):
-    print(f"🔎 Scanning: {symbol} ({tf})...", end="\r")
+    # Tính toán
+    df['ema_200'] = calculate_ema(df['close'], 200)
+    df = find_swings(df, window=5)
 
-    df = get_data(symbol, tf)
-    if df is None: return
+    # Chạy Logic
+    signal, strat, entry, sl, tp, trend = check_sniper_setup(df)
+    current_price = df.iloc[-1]['close'] # Giá realtime (để báo cáo)
 
-    # Tính toán cơ bản
-    df['rsi'] = calculate_rsi(df['close'], 14)
-    df = find_pivots(df, window=3) # Tìm đỉnh đáy cho SMC
-
-    # --- CHẠY LOGIC SMC ---
-    signal, strat_name, entry, sl, tp = check_smc_strategy(df)
-
+    # 1. Nếu có tín hiệu MUA/BÁN -> Gửi ngay lập tức
     if signal:
-        rr = abs(tp - entry) / abs(entry - sl) if abs(entry - sl) > 0 else 0
-        icon = "💎" if signal == "BUY" else "🩸"
+        # Tính tỷ lệ Risk:Reward
+        risk = abs(entry - sl)
+        reward = abs(tp - entry)
+        rr = reward / risk if risk > 0 else 0
         
-        msg = (
-            f"{icon} SMC SIGNAL: {symbol} ({tf})\n"
-            f"Strategy: {strat_name}\n"
-            f"Type: {signal}\n"
-            f"Entry: {entry:.4f}\n"
-            f"SL: {sl:.4f} | TP: {tp:.4f}\n"
-            f"R:R: 1:{rr:.1f}\n"
-            f"Vol: {df.iloc[-1]['vol']:.2f}"
-        )
-        print(f"\n{msg}")
-        send_telegram(msg)
-        REPORT_DATA.append(f"{icon} {symbol} ({tf}): {strat_name}")
-    else:
-        # Nếu không có kèo SMC, lưu trạng thái xu hướng cơ bản
-        trend = "Bullish" if df.iloc[-1]['close'] > df.iloc[-1]['open'] else "Bearish"
-        REPORT_DATA.append(f"Analyzing {symbol} ({tf}): {trend} (No Setup)")
+        # Chỉ báo kèo nếu R:R >= 1.5 (Lọc kèo rác)
+        if rr >= 1.5:
+            icon = "🚀 LONG MỚI" if signal == "BUY" else "🛑 SHORT MỚI"
+            msg = (
+                f"*{icon}: {symbol} ({tf})*\n"
+                f"-------------------\n"
+                f"Strategy: _{strat}_\n"
+                f"Entry: `{entry}`\n"
+                f"Stoploss: `{sl:.4f}`\n"
+                f"Take Profit: `{tp:.4f}`\n"
+                f"R:R: `1:{rr:.1f}`\n"
+                f"Trend: {trend}\n"
+                f"_Check chart trước khi vào lệnh!_"
+            )
+            print(f"\n🔥 FOUND SIGNAL: {symbol}")
+            send_telegram(msg)
+            # Thêm vào báo cáo tổng kết là có kèo
+            SUMMARY_REPORT.append(f"🔥 *{symbol} ({tf})*: {signal} Signal!")
+            return
+
+    # 2. Nếu không có tín hiệu -> Lưu trạng thái để báo cáo cuối cùng
+    # Format: [Icon Trend] Coin (Khung): Giá
+    SUMMARY_REPORT.append(f"{trend} {symbol} ({tf}) | Price: {current_price}")
 
 # ==========================================
-# MAIN LOOP
+# --- 5. MAIN LOOP ---
 # ==========================================
 
 if __name__ == "__main__":
-    print(f"\n--- SMC BOT START: {datetime.now().strftime('%H:%M')} ---")
+    start_time = datetime.now().strftime('%H:%M')
+    print(f"\n--- BOT STARTED AT {start_time} ---")
     
-    REPORT_DATA = []
+    SUMMARY_REPORT = [] # Reset báo cáo
     
+    # Chạy vòng lặp qua từng coin và từng khung
     for symbol in PAIRS:
         for tf in TIMEFRAMES:
             analyze(symbol, tf)
-            time.sleep(1) # Tránh rate limit
+            time.sleep(1) # Nghỉ 1s để tránh spam API sàn
             
-    # Gửi báo cáo tổng kết ngắn gọn (Optional)
-    # if REPORT_DATA:
-    #     summary = "📊 SCAN COMPLETED:\n" + "\n".join(REPORT_DATA)
-    #     send_telegram(summary)
+    # --- GỬI BÁO CÁO TỔNG KẾT (ALIVE MONITOR) ---
+    # Bot sẽ gửi 1 tin nhắn duy nhất chứa danh sách trend của tất cả coin
+    if SUMMARY_REPORT:
+        report_msg = f"🤖 *STATUS REPORT ({start_time})*\n"
+        report_msg += "-----------------------------\n"
+        report_msg += "\n".join(SUMMARY_REPORT)
+        
+        print("\nSending Summary Report...")
+        send_telegram(report_msg)
         
     print("\n🏁 Done.")
