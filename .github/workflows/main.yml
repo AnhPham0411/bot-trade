@@ -1,34 +1,38 @@
-name: Crypto Bot H1-H4
+name: Crypto Bot SMC (H1-H4)
 
 on:
   schedule:
-    # Chạy vào phút thứ 5 của mỗi giờ
+    # Chạy vào phút thứ 5 của mỗi giờ (để đảm bảo nến 1H/4H đóng hẳn và sàn cập nhật data)
     - cron: '5 * * * *'
   
-  workflow_dispatch: # Nút chạy tay
+  workflow_dispatch: # Nút bấm chạy tay (để test ngay lập tức)
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    
+    # Quan trọng: Ngắt job nếu chạy quá 10 phút (tránh treo bot tốn tiền/quota)
+    timeout-minutes: 10
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.10'
+        cache: 'pip' # Cache lại thư viện để chạy nhanh hơn ở các lần sau
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        
-        # CHỈ CẦN 3 THƯ VIỆN NÀY LÀ ĐỦ (Xóa hết pandas-ta)
-        pip install ccxt pandas requests numpy
-        
+        # Cài đúng các thư viện đã dùng trong code Python
+        pip install ccxt pandas numpy requests
+
     - name: Run Trading Bot
       env:
+        # Đảm bảo bạn đã thêm 2 cái này vào Settings > Secrets and variables > Actions
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: python main.py
