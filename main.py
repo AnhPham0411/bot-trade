@@ -32,17 +32,16 @@ def calculate_ema(series, length):
     return series.ewm(span=length, adjust=False).mean()
 
 def calculate_rsi(series, length=14):
-    """Tính RSI chuẩn để lọc Overbought/Oversold"""
+    """Tính RSI chuẩn"""
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=length).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=length).mean()
-    # Tránh chia cho 0
     loss = loss.replace(0, np.nan) 
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
 def calculate_atr(df, length=14):
-    """Tính ATR để đo độ biến động"""
+    """Tính ATR đo biến động"""
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
@@ -51,10 +50,7 @@ def calculate_atr(df, length=14):
     return true_range.rolling(window=length).mean()
 
 def find_swings(df, window=7):
-    """
-    NÂNG CẤP: Window = 7 (thay vì 5)
-    Giúp xác định cấu trúc Swing High/Low rõ ràng hơn, lọc nhiễu trong Crypto.
-    """
+    """Window = 7 để lọc nhiễu tốt hơn"""
     df['swing_high'] = df['high'].rolling(window=window*2+1, center=True).max()
     df['swing_low'] = df['low'].rolling(window=window*2+1, center=True).min()
     df['is_high'] = (df['high'] == df['swing_high'])
@@ -62,22 +58,19 @@ def find_swings(df, window=7):
     return df
 
 # ==========================================
-# --- 3. LOGIC SMC "SNIPER" (CORE) ---
+# --- 3. LOGIC SMC (MODIFIED: VOL > 1.5) ---
 # ==========================================
 
 def check_sniper_setup(df):
     """
-    Logic SMC Nâng cao:
-    1. Trend: EMA 200
-    2. Structure: Swing (Window 7)
-    3. Area: Fibo 50% (Premium/Discount)
-    4. Filter: RSI, Volume > 2x, ATR (Volatility), Momentum Candle
+    Logic SMC đã điều chỉnh:
+    - Volume Filter: > 1.5 lần trung bình (Thay vì 2.0)
+    - RR Filter: Sẽ check ở hàm analyze (> 1.5)
     """
-    # Lấy nến vừa đóng cửa (Confirmed Candle)
+    # Lấy nến vừa đóng cửa
     curr = df.iloc[-2] 
     prev = df.iloc[-3]
     
-    # Xác định xu hướng
     ema_200 = df['ema_200'].iloc[-2]
     trend_txt = "🟢 UP" if curr['close'] > ema_200 else "🔴 DOWN"
     
@@ -87,92 +80,83 @@ def check_sniper_setup(df):
     sl = 0
     tp = 0
 
-    # Lấy giá trị Indicator tại nến đóng cửa
+    # Chỉ số tại nến đóng cửa
     atr_val = df['atr'].iloc[-2]
     rsi_val = df['rsi'].iloc[-2]
     vol_val = curr['vol']
     avg_vol = df['vol'].rolling(20).mean().iloc[-2]
 
-    # --- GLOBAL FILTER (BỘ LỌC CHUNG) ---
-    # 1. Lọc Sideway: Nếu ATR quá thấp (thị trường ngủ đông) -> Bỏ qua
-    # So sánh ATR hiện tại với ATR trung bình 50 cây nến trước
+    # --- 1. GLOBAL FILTER ---
+    # Lọc Sideway (ATR quá thấp)
     avg_atr = df['atr'].rolling(50).mean().iloc[-2]
-    if atr_val < avg_atr * 0.8: # Nới lỏng chút so với 0.5 để không bị miss quá nhiều
+    if atr_val < avg_atr * 0.8: 
         return None, "", 0, 0, 0, trend_txt + " (Low Volatility)"
 
-    # 2. Lọc Volume: Yêu cầu Volume nến tín hiệu phải đột biến (Gấp 2 lần trung bình)
-    if vol_val < avg_vol * 2.0:
+    # Lọc Volume: GIẢM XUỐNG 1.5 (Theo yêu cầu)
+    # Chỉ cần Volume lớn hơn 1.5 lần trung bình 20 phiên
+    if vol_val < avg_vol * 1.5:
         return None, "", 0, 0, 0, trend_txt + " (Weak Vol)"
 
     # --- SETUP BUY (LONG) ---
-    # Trend Tăng + RSI < 50 (Giá đã hồi sâu về vùng Discount)
-    if curr['close'] > ema_200 and rsi_val < 55: # Cho phép RSI < 55 để bắt sớm hơn chút
-        
-        # Tìm cấu trúc Swing (60 nến)
+    if curr['close'] > ema_200 and rsi_val < 55: 
         recent_data = df.iloc[-60:-2] 
         last_low = recent_data[recent_data['is_low'] == True]['low'].min()
         last_high = recent_data[recent_data['is_high'] == True]['high'].max()
         
         if not pd.isna(last_low) and not pd.isna(last_high) and last_high > last_low:
-            # Fibo Discount Check
             fibo_05 = last_low + 0.5 * (last_high - last_low)
             
             if curr['low'] <= fibo_05:
-                # Trigger 1: Pinbar Bullish (Rút chân dưới)
+                # Pinbar Bullish
                 body = abs(curr['close'] - curr['open'])
                 lower_wick = min(curr['close'], curr['open']) - curr['low']
                 is_pinbar = lower_wick > (body * 2)
                 
-                # Trigger 2: Engulfing Bullish
+                # Engulfing Bullish
                 is_engulfing = (curr['close'] > prev['open']) and (curr['open'] < prev['close'])
                 
-                # MOMENTUM CHECK: Nến tín hiệu bắt buộc phải là NẾN XANH (Close > Open)
+                # Momentum: Nến Xanh
                 is_green_candle = curr['close'] > curr['open']
 
                 if (is_pinbar or is_engulfing) and is_green_candle:
                     signal = "BUY"
-                    strat_name = "Sniper Discount (RSI+Vol)"
+                    strat_name = "Pullback Discount"
                     entry = curr['close']
-                    # SL đặt dưới đáy cũ hoặc râu nến + 1 chút buffer bằng ATR
                     sl = min(curr['low'], last_low) - (atr_val * 0.5) 
-                    tp = last_high # Target đỉnh cũ
+                    tp = last_high
 
     # --- SETUP SELL (SHORT) ---
-    # Trend Giảm + RSI > 50 (Giá đã hồi lên vùng Premium)
-    elif curr['close'] < ema_200 and rsi_val > 45: # Cho phép RSI > 45
-        
+    elif curr['close'] < ema_200 and rsi_val > 45: 
         recent_data = df.iloc[-60:-2]
         last_low = recent_data[recent_data['is_low'] == True]['low'].min()
         last_high = recent_data[recent_data['is_high'] == True]['high'].max()
         
         if not pd.isna(last_low) and not pd.isna(last_high) and last_high > last_low:
-            # Fibo Premium Check
             fibo_05 = last_low + 0.5 * (last_high - last_low)
             
             if curr['high'] >= fibo_05:
-                # Trigger 1: Pinbar Bearish
+                # Pinbar Bearish
                 body = abs(curr['close'] - curr['open'])
                 upper_wick = curr['high'] - max(curr['close'], curr['open'])
                 is_pinbar = upper_wick > (body * 2)
                 
-                # Trigger 2: Engulfing Bearish
+                # Engulfing Bearish
                 is_engulfing = (curr['close'] < prev['open']) and (curr['open'] > prev['close'])
                 
-                # MOMENTUM CHECK: Nến tín hiệu bắt buộc phải là NẾN ĐỎ
+                # Momentum: Nến Đỏ
                 is_red_candle = curr['close'] < curr['open']
 
                 if (is_pinbar or is_engulfing) and is_red_candle:
                     signal = "SELL"
-                    strat_name = "Sniper Premium (RSI+Vol)"
+                    strat_name = "Pullback Premium"
                     entry = curr['close']
-                    # SL đặt trên đỉnh cũ hoặc râu nến + buffer ATR
                     sl = max(curr['high'], last_high) + (atr_val * 0.5)
-                    tp = last_low # Target đáy cũ
+                    tp = last_low
 
     return signal, strat_name, entry, sl, tp, trend_txt
 
 # ==========================================
-# --- 4. HÀM GỬI TELEGRAM & XỬ LÝ ---
+# --- 4. GỬI TELEGRAM & XỬ LÝ ---
 # ==========================================
 
 def send_telegram(msg):
@@ -192,7 +176,6 @@ def analyze(symbol, tf):
     print(f"🔎 Scanning: {symbol} ({tf})...", end="\r")
     
     try:
-        # Tăng limit lên 500 để đủ dữ liệu tính RSI, EMA, Swing chuẩn
         bars = exchange.fetch_ohlcv(symbol, tf, limit=500)
         df = pd.DataFrame(bars, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
         df['ts'] = pd.to_datetime(df['ts'], unit='ms')
@@ -201,13 +184,13 @@ def analyze(symbol, tf):
         SUMMARY_REPORT.append(f"⚠️ {symbol} ({tf}): Lỗi Data")
         return
 
-    # Tính toán Indicators
+    # Tính Indicators
     df['ema_200'] = calculate_ema(df['close'], 200)
-    df['rsi'] = calculate_rsi(df['close'], 14) # Thêm RSI
-    df['atr'] = calculate_atr(df, 14)          # Thêm ATR
-    df = find_swings(df, window=7)             # Window=7
+    df['rsi'] = calculate_rsi(df['close'], 14) 
+    df['atr'] = calculate_atr(df, 14)          
+    df = find_swings(df, window=7)             
 
-    # Chạy Logic Sniper
+    # Chạy Logic
     signal, strat, entry, sl, tp, trend = check_sniper_setup(df)
     current_price = df.iloc[-1]['close']
 
@@ -217,11 +200,16 @@ def analyze(symbol, tf):
         reward = abs(tp - entry)
         rr = reward / risk if risk > 0 else 0
         
-        # NÂNG CẤP: Chỉ báo kèo nếu RR >= 2.0 (Kèo chất lượng cao)
-        if rr >= 2.0:
-            icon = "🎯 SNIPER LONG" if signal == "BUY" else "🎯 SNIPER SHORT"
+        # Tính Volume Ratio để hiển thị
+        cur_vol = df.iloc[-2]['vol']
+        avg_vol = df['vol'].rolling(20).mean().iloc[-2]
+        vol_ratio = cur_vol / avg_vol if avg_vol > 0 else 0
+
+        # --- ĐIỀU KIỆN RR: GIẢM XUỐNG >= 1.5 ---
+        if rr >= 1.5:
+            icon = "🟢 LONG" if signal == "BUY" else "🔴 SHORT"
             
-            # Format tin nhắn gọn gàng, chuyên nghiệp
+            # Tin nhắn hiển thị đầy đủ Volume và RR
             msg = (
                 f"*{icon}: {symbol} ({tf})*\n"
                 f"-------------------\n"
@@ -229,16 +217,16 @@ def analyze(symbol, tf):
                 f"Entry: `{entry}`\n"
                 f"Stoploss: `{sl:.4f}`\n"
                 f"Take Profit: `{tp:.4f}`\n"
-                f"Risk/Reward: `1:{rr:.2f}`\n"
+                f"Risk/Reward: `1:{rr:.2f}` ✅\n"
+                f"Volume: `{vol_ratio:.2f}x` Avg 📊\n"
                 f"Trend: {trend}\n"
-                f"Volume: 2x Avg ✅ | RSI Filter ✅\n"
             )
-            print(f"\n🔥 FOUND SIGNAL: {symbol}")
+            print(f"\n🔥 SIGNAL: {symbol} (Vol: {vol_ratio:.1f}x, RR: {rr:.1f})")
             send_telegram(msg)
             SUMMARY_REPORT.append(f"🔥 *{symbol} ({tf})*: {signal} (RR 1:{rr:.1f})")
             return
 
-    # Nếu không có tín hiệu, lưu report
+    # Nếu không có tín hiệu
     SUMMARY_REPORT.append(f"{trend} {symbol} ({tf}) | P: {current_price}")
 
 # ==========================================
@@ -247,7 +235,7 @@ def analyze(symbol, tf):
 
 if __name__ == "__main__":
     start_time = datetime.now().strftime('%H:%M')
-    print(f"\n--- SNIPER BOT STARTED AT {start_time} ---")
+    print(f"\n--- BOT STARTED AT {start_time} ---")
     
     SUMMARY_REPORT = []
     
@@ -256,11 +244,10 @@ if __name__ == "__main__":
             analyze(symbol, tf)
             time.sleep(1) 
             
-    # Gửi báo cáo trạng thái Alive
+    # Gửi báo cáo Alive
     if SUMMARY_REPORT:
         report_msg = f"🤖 *BOT STATUS ({start_time})*\n"
         report_msg += "-----------------------------\n"
-        # Chỉ lấy 6 dòng đầu tiên để tránh spam quá dài nếu list nhiều coin
         report_msg += "\n".join(SUMMARY_REPORT[:15]) 
         
         print("\nSending Summary Report...")
