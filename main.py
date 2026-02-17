@@ -4,19 +4,23 @@ import os
 import requests
 import time
 import ccxt
-from datetime import datetime, timezone
+from datetime import datetime
 
 # ==========================================
-# --- 1. CẤU HÌNH (CONFIGURATION) ---
+# --- 1. CẤU HÌNH ---
 # ==========================================
-PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT']
-TIMEFRAMES = ['15m', '1h', '4h'] 
+PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT']
 
-# Telegram Config
+# Mapping MTF
+MTF_MAPPING = {
+    '15m': '1h',
+    '1h':  '4h',
+    '4h':  '1d'
+}
+
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-CHAT_IDS = [os.getenv('TELEGRAM_CHAT_ID')] 
+CHAT_IDS = [os.getenv('TELEGRAM_CHAT_ID')]
 
-# Kết nối sàn MEXC
 exchange = ccxt.mexc({
     'enableRateLimit': True, 
     'options': {'defaultType': 'spot'}
@@ -25,232 +29,277 @@ exchange = ccxt.mexc({
 SUMMARY_REPORT = []
 
 # ==========================================
-# --- 2. HÀM TÍNH TOÁN INDICATOR ---
+# --- 2. HÀM CORE (INDICATOR, FRACTAL, FVG) ---
 # ==========================================
 
 def calculate_ema(series, length):
     return series.ewm(span=length, adjust=False).mean()
 
 def calculate_rsi(series, length=14):
-    """Tính RSI chuẩn"""
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=length).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=length).mean()
-    loss = loss.replace(0, np.nan) 
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
+    loss = loss.replace(0, np.nan)
+    return 100 - (100 / (1 + (gain / loss)))
 
 def calculate_atr(df, length=14):
-    """Tính ATR đo biến động"""
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
     ranges = pd.concat([high_low, high_close, low_close], axis=1)
-    true_range = np.max(ranges, axis=1)
-    return true_range.rolling(window=length).mean()
+    return np.max(ranges, axis=1).rolling(window=length).mean()
 
-def find_swings(df, window=7):
-    """Window = 7 để lọc nhiễu tốt hơn"""
-    df['swing_high'] = df['high'].rolling(window=window*2+1, center=True).max()
-    df['swing_low'] = df['low'].rolling(window=window*2+1, center=True).min()
-    df['is_high'] = (df['high'] == df['swing_high'])
-    df['is_low'] = (df['low'] == df['swing_low'])
+def identify_fractals(df):
+    """Tìm đỉnh đáy Fractal 5 nến"""
+    df['is_fractal_high'] = False
+    df['is_fractal_low'] = False
+    for i in range(2, len(df) - 2):
+        if (df['high'][i] > df['high'][i-1] and df['high'][i] > df['high'][i-2] and 
+            df['high'][i] > df['high'][i+1] and df['high'][i] > df['high'][i+2]):
+            df.at[i, 'is_fractal_high'] = True
+        if (df['low'][i] < df['low'][i-1] and df['low'][i] < df['low'][i-2] and 
+            df['low'][i] < df['low'][i+1] and df['low'][i] < df['low'][i+2]):
+            df.at[i, 'is_fractal_low'] = True
     return df
 
-# ==========================================
-# --- 3. LOGIC SMC (MODIFIED: VOL > 1.5) ---
-# ==========================================
-
-def check_sniper_setup(df):
+def check_fvg(df, idx, direction):
     """
-    Logic SMC đã điều chỉnh:
-    - Volume Filter: > 1.1 lần trung bình (Thay vì 2.0)
-    - RR Filter: Sẽ check ở hàm analyze (> 1.5)
+    Kiểm tra xem cây nến tại idx (hoặc ngay sau nó) có tạo ra FVG không.
     """
-    # Lấy nến vừa đóng cửa
-    curr = df.iloc[-2] 
-    prev = df.iloc[-3]
+    if idx + 2 >= len(df): return False
     
-    ema_200 = df['ema_200'].iloc[-2]
-    trend_txt = "🟢 UP" if curr['close'] > ema_200 else "🔴 DOWN"
-    
-    signal = None
-    strat_name = ""
-    entry = 0
-    sl = 0
-    tp = 0
-
-    # Chỉ số tại nến đóng cửa
-    atr_val = df['atr'].iloc[-2]
-    rsi_val = df['rsi'].iloc[-2]
-    vol_val = curr['vol']
-    avg_vol = df['vol'].rolling(20).mean().iloc[-2]
-
-    # --- 1. GLOBAL FILTER ---
-    # Lọc Sideway (ATR quá thấp)
-    avg_atr = df['atr'].rolling(50).mean().iloc[-2]
-    if atr_val < avg_atr * 0.8: 
-        return None, "", 0, 0, 0, trend_txt + " (Low Volatility)"
-
-    # Lọc Volume: GIẢM XUỐNG 1.5 (Theo yêu cầu)
-    # Chỉ cần Volume lớn hơn 1.5 lần trung bình 20 phiên
-    if vol_val < avg_vol * 1.3:
-        return None, "", 0, 0, 0, trend_txt + " (Weak Vol)"
-
-    # --- SETUP BUY (LONG) ---
-    if curr['close'] > ema_200 and rsi_val < 55: 
-        recent_data = df.iloc[-60:-2] 
-        last_low = recent_data[recent_data['is_low'] == True]['low'].min()
-        last_high = recent_data[recent_data['is_high'] == True]['high'].max()
-        
-        if not pd.isna(last_low) and not pd.isna(last_high) and last_high > last_low:
-            fibo_05 = last_low + 0.5 * (last_high - last_low)
+    # FVG Bullish: Low[i+2] > High[i] (Có khoảng trống)
+    if direction == "UP":
+        candle_1_high = df['high'].iloc[idx]
+        candle_3_low = df['low'].iloc[idx + 2]
+        if candle_3_low > candle_1_high:
+            return True # Có FVG Tăng
             
-            if curr['low'] <= fibo_05:
-                # Pinbar Bullish
-                body = abs(curr['close'] - curr['open'])
-                lower_wick = min(curr['close'], curr['open']) - curr['low']
-                is_pinbar = lower_wick > (body * 2)
-                
-                # Engulfing Bullish
-                is_engulfing = (curr['close'] > prev['open']) and (curr['open'] < prev['close'])
-                
-                # Momentum: Nến Xanh
-                is_green_candle = curr['close'] > curr['open']
-
-                if (is_pinbar or is_engulfing) and is_green_candle:
-                    signal = "BUY"
-                    strat_name = "Pullback Discount"
-                    entry = curr['close']
-                    sl = min(curr['low'], last_low) - (atr_val * 0.5) 
-                    tp = last_high
-
-    # --- SETUP SELL (SHORT) ---
-    elif curr['close'] < ema_200 and rsi_val > 45: 
-        recent_data = df.iloc[-60:-2]
-        last_low = recent_data[recent_data['is_low'] == True]['low'].min()
-        last_high = recent_data[recent_data['is_high'] == True]['high'].max()
-        
-        if not pd.isna(last_low) and not pd.isna(last_high) and last_high > last_low:
-            fibo_05 = last_low + 0.5 * (last_high - last_low)
+    # FVG Bearish: High[i+2] < Low[i]
+    elif direction == "DOWN":
+        candle_1_low = df['low'].iloc[idx]
+        candle_3_high = df['high'].iloc[idx + 2]
+        if candle_3_high < candle_1_low:
+            return True # Có FVG Giảm
             
-            if curr['high'] >= fibo_05:
-                # Pinbar Bearish
-                body = abs(curr['close'] - curr['open'])
-                upper_wick = curr['high'] - max(curr['close'], curr['open'])
-                is_pinbar = upper_wick > (body * 2)
-                
-                # Engulfing Bearish
-                is_engulfing = (curr['close'] < prev['open']) and (curr['open'] > prev['close'])
-                
-                # Momentum: Nến Đỏ
-                is_red_candle = curr['close'] < curr['open']
+    return False
 
-                if (is_pinbar or is_engulfing) and is_red_candle:
-                    signal = "SELL"
-                    strat_name = "Pullback Premium"
-                    entry = curr['close']
-                    sl = max(curr['high'], last_high) + (atr_val * 0.5)
-                    tp = last_low
-
-    return signal, strat_name, entry, sl, tp, trend_txt
+def get_htf_trend(symbol, htf):
+    try:
+        bars = exchange.fetch_ohlcv(symbol, htf, limit=100)
+        df = pd.DataFrame(bars, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+        ema_200 = calculate_ema(df['close'], 200).iloc[-1]
+        return "UP" if df['close'].iloc[-1] > ema_200 else "DOWN"
+    except: return "SIDEWAY"
 
 # ==========================================
-# --- 4. GỬI TELEGRAM & XỬ LÝ ---
+# --- 3. LOGIC TÌM OB + FVG (COMBINED) ---
 # ==========================================
 
+def find_quality_zone(df, trend):
+    """
+    Tìm vùng Buy/Sell tốt nhất:
+    Trả về: Giá Entry, Giá SL, Có FVG không?
+    """
+    zone_price = 0
+    zone_sl = 0
+    has_fvg = False
+    
+    fractal_lows = df[df['is_fractal_low'] == True]
+    fractal_highs = df[df['is_fractal_high'] == True]
+
+    if trend == "UP":
+        if fractal_lows.empty: return 0, 0, False
+        last_low_idx = fractal_lows.index[-1]
+        
+        # Quét nến đỏ gần đáy nhất
+        subset = df.iloc[max(0, last_low_idx-3):min(len(df), last_low_idx+3)]
+        red_candles = subset[subset['close'] < subset['open']]
+        
+        if not red_candles.empty:
+            best_ob = red_candles.loc[red_candles['low'].idxmin()]
+            ob_idx = df.index.get_loc(best_ob.name)
+            
+            zone_price = best_ob['high']
+            zone_sl = best_ob['low']
+            
+            # Check xem ngay sau OB có FVG không? (Tăng độ uy tín)
+            has_fvg = check_fvg(df, ob_idx, "UP")
+        else:
+            # Fallback về đáy nếu không thấy nến đỏ
+            zone_price = df['low'].iloc[last_low_idx]
+            zone_sl = zone_price * 0.995
+
+    elif trend == "DOWN":
+        if fractal_highs.empty: return 0, 0, False
+        last_high_idx = fractal_highs.index[-1]
+        
+        subset = df.iloc[max(0, last_high_idx-3):min(len(df), last_high_idx+3)]
+        green_candles = subset[subset['close'] > subset['open']]
+        
+        if not green_candles.empty:
+            best_ob = green_candles.loc[green_candles['high'].idxmax()]
+            ob_idx = df.index.get_loc(best_ob.name)
+            
+            zone_price = best_ob['low']
+            zone_sl = best_ob['high']
+            
+            has_fvg = check_fvg(df, ob_idx, "DOWN")
+        else:
+            zone_price = df['high'].iloc[last_high_idx]
+            zone_sl = zone_price * 1.005
+
+    return zone_price, zone_sl, has_fvg
+
+# ==========================================
+# --- 4. LOGIC CHẤM ĐIỂM (SCORING) ---
+# ==========================================
+
+def analyze_with_scoring(symbol, tf):
+    htf = MTF_MAPPING.get(tf)
+    if not htf: return
+
+    # 1. Check Trend HTF
+    htf_trend = get_htf_trend(symbol, htf)
+    
+    try:
+        bars = exchange.fetch_ohlcv(symbol, tf, limit=300)
+        df = pd.DataFrame(bars, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+        df['ts'] = pd.to_datetime(df['ts'], unit='ms')
+    except: return
+
+    df['rsi'] = calculate_rsi(df['close'])
+    df = identify_fractals(df)
+
+    # 2. Tìm Zone (OB + FVG)
+    zone_entry, zone_sl, has_fvg = find_quality_zone(df, htf_trend)
+    
+    if zone_entry == 0: 
+        print(f"{symbol} ({tf}): No Struct found.")
+        return
+
+    curr = df.iloc[-2] # Nến vừa đóng
+    current_price = df.iloc[-1]['close']
+    
+    # --- BẮT ĐẦU CHẤM ĐIỂM ---
+    score = 0
+    factors = []
+    
+    # Điểm 1: Trend HTF (Mặc định lọc theo trend nên auto +1 nếu pass)
+    score += 1 
+    factors.append(f"Trend {htf_trend}")
+    
+    # Điểm 2: Chất lượng Zone (Có FVG không?)
+    if has_fvg:
+        score += 1
+        factors.append("SMC Imbalance (FVG)")
+    else:
+        factors.append("Standard OB")
+
+    # Điểm 3: Giá đã về vùng Entry chưa? (Price Action)
+    # Chấp nhận sai số 0.3%
+    in_zone = False
+    tolerance = zone_entry * 0.003
+    
+    if htf_trend == "UP":
+        dist = curr['low'] - zone_entry
+        if dist <= tolerance and curr['close'] > zone_sl:
+            in_zone = True
+    elif htf_trend == "DOWN":
+        dist = zone_entry - curr['high']
+        if dist <= tolerance and curr['close'] < zone_sl:
+            in_zone = True
+            
+    if in_zone:
+        score += 1
+        factors.append("Price Tap Zone")
+        
+        # Điểm 4: Trigger Nến (Chỉ tính khi đã vào Zone)
+        is_trigger = False
+        body = abs(curr['close'] - curr['open'])
+        
+        if htf_trend == "UP":
+            # Pinbar hoặc Engulfing Tăng
+            lower_wick = min(curr['open'], curr['close']) - curr['low']
+            is_pinbar = lower_wick > body * 1.5
+            is_engulfing = (curr['close'] > curr['open']) and (curr['close'] > df.iloc[-3]['high'])
+            if is_pinbar or is_engulfing: is_trigger = True
+            
+        elif htf_trend == "DOWN":
+            # Pinbar hoặc Engulfing Giảm
+            upper_wick = curr['high'] - max(curr['open'], curr['close'])
+            is_pinbar = upper_wick > body * 1.5
+            is_engulfing = (curr['close'] < curr['open']) and (curr['close'] < df.iloc[-3]['low'])
+            if is_pinbar or is_engulfing: is_trigger = True
+            
+        if is_trigger:
+            score += 1
+            factors.append("Candle Trigger 🔥")
+
+    # --- IN KẾT QUẢ ---
+    
+    # Status hiển thị
+    status_msg = ""
+    if in_zone:
+        status_msg = f"⚡ IN ZONE (Score: {score}/4)"
+    else:
+        dist_percent = abs(current_price - zone_entry) / current_price * 100
+        status_msg = f"Waiting: {zone_entry:.4f} (Away {dist_percent:.2f}%)"
+        if has_fvg: status_msg += " [FVG+]"
+
+    print(f"{symbol:<8} ({tf}) | {htf_trend:<4} | Score: {score}/4 | {status_msg}")
+    SUMMARY_REPORT.append(f"{symbol} {tf}: {status_msg}")
+
+    # --- RA QUYẾT ĐỊNH ---
+    # Chỉ báo lệnh nếu Score >= 2 (Nới lỏng theo yêu cầu)
+    # Nếu Score = 2: Cảnh báo (Weak)
+    # Nếu Score >= 3: Tín hiệu Mạnh (Strong)
+    
+    if in_zone and score >= 2:
+        signal_type = "BUY" if htf_trend == "UP" else "SELL"
+        strength = "STRONG 🔥" if score >= 3 else "MODERATE ⚠️"
+        
+        risk = abs(zone_entry - zone_sl)
+        tp = zone_entry + (risk * 3) if signal_type == "BUY" else zone_entry - (risk * 3)
+        rr = abs(tp - zone_entry) / risk if risk > 0 else 0
+        
+        # In ra các yếu tố (Confluence)
+        reasons_str = "\n   + ".join(factors)
+        
+        msg = (
+            f"💎 *SMC PRO SIGNAL ({strength})*\n"
+            f"Symbol: {symbol} ({tf})\n"
+            f"Score: *{score}/4* ✅\n"
+            f"-----------------\n"
+            f"Signal: *{signal_type}*\n"
+            f"Entry Zone: `{zone_entry}`\n"
+            f"Stoploss: `{zone_sl}`\n"
+            f"TP (Planned): `{tp}`\n"
+            f"R:R: `1:{rr:.2f}`\n"
+            f"-----------------\n"
+            f"🔍 *Confluences:*\n   + {reasons_str}"
+        )
+        print(f"\n🚀 SIGNAL FOUND: {symbol} ({score} pts)")
+        send_telegram(msg)
+
+# ==========================================
+# --- 5. HÀM GỬI TIN & MAIN ---
+# ==========================================
 def send_telegram(msg):
     if not TELEGRAM_TOKEN: return
-    unique_ids = list(set(filter(None, CHAT_IDS)))
-    for chat_id in unique_ids:
+    for chat_id in CHAT_IDS:
         try:
             requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"},
-                timeout=5
-            )
-        except Exception as e:
-            print(f"❌ Lỗi gửi tele: {e}")
-
-def analyze(symbol, tf):
-    print(f"🔎 Scanning: {symbol} ({tf})...", end="\r")
-    
-    try:
-        bars = exchange.fetch_ohlcv(symbol, tf, limit=500)
-        df = pd.DataFrame(bars, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-        df['ts'] = pd.to_datetime(df['ts'], unit='ms')
-    except Exception as e:
-        print(f"❌ Error getting data for {symbol}: {e}")
-        SUMMARY_REPORT.append(f"⚠️ {symbol} ({tf}): Lỗi Data")
-        return
-
-    # Tính Indicators
-    df['ema_200'] = calculate_ema(df['close'], 200)
-    df['rsi'] = calculate_rsi(df['close'], 14) 
-    df['atr'] = calculate_atr(df, 14)          
-    df = find_swings(df, window=7)             
-
-    # Chạy Logic
-    signal, strat, entry, sl, tp, trend = check_sniper_setup(df)
-    current_price = df.iloc[-1]['close']
-
-    # Xử lý Tín hiệu
-    if signal:
-        risk = abs(entry - sl)
-        reward = abs(tp - entry)
-        rr = reward / risk if risk > 0 else 0
-        
-        # Tính Volume Ratio để hiển thị
-        cur_vol = df.iloc[-2]['vol']
-        avg_vol = df['vol'].rolling(20).mean().iloc[-2]
-        vol_ratio = cur_vol / avg_vol if avg_vol > 0 else 0
-
-        # --- ĐIỀU KIỆN RR: GIẢM XUỐNG >= 1.5 ---
-        if rr >= 1.25:
-            icon = "🟢 LONG" if signal == "BUY" else "🔴 SHORT"
-            
-            # Tin nhắn hiển thị đầy đủ Volume và RR
-            msg = (
-                f"*{icon}: {symbol} ({tf})*\n"
-                f"-------------------\n"
-                f"Strategy: _{strat}_\n"
-                f"Entry: `{entry}`\n"
-                f"Stoploss: `{sl:.4f}`\n"
-                f"Take Profit: `{tp:.4f}`\n"
-                f"Risk/Reward: `1:{rr:.2f}` ✅\n"
-                f"Volume: `{vol_ratio:.2f}x` Avg 📊\n"
-                f"Trend: {trend}\n"
-            )
-            print(f"\n🔥 SIGNAL: {symbol} (Vol: {vol_ratio:.1f}x, RR: {rr:.1f})")
-            send_telegram(msg)
-            SUMMARY_REPORT.append(f"🔥 *{symbol} ({tf})*: {signal} (RR 1:{rr:.1f})")
-            return
-
-    # Nếu không có tín hiệu
-    SUMMARY_REPORT.append(f"{trend} {symbol} ({tf}) | P: {current_price}")
-
-# ==========================================
-# --- 5. MAIN LOOP ---
-# ==========================================
+                json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"}, timeout=5)
+        except: pass
 
 if __name__ == "__main__":
-    start_time = datetime.now().strftime('%H:%M')
-    print(f"\n--- BOT STARTED AT {start_time} ---")
-    
-    SUMMARY_REPORT = []
+    print(f"\n--- BOT SMC 9.5 (SCORING SYSTEM) ---")
+    print("Criteria: Trend(1) + OB(1) + FVG(1) + Trigger(1)")
+    print("Signal Condition: Score >= 2\n")
     
     for symbol in PAIRS:
-        for tf in TIMEFRAMES:
-            analyze(symbol, tf)
-            time.sleep(1) 
-            
-    # Gửi báo cáo Alive
-    if SUMMARY_REPORT:
-        report_msg = f"🤖 *BOT STATUS ({start_time})*\n"
-        report_msg += "-----------------------------\n"
-        report_msg += "\n".join(SUMMARY_REPORT[:15]) 
-        
-        print("\nSending Summary Report...")
-        send_telegram(report_msg)
-        
-    print("\n🏁 Done.")
+        for tf in MTF_MAPPING.keys():
+            analyze_with_scoring(symbol, tf)
+            time.sleep(1)
