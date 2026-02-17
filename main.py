@@ -64,7 +64,7 @@ def find_swings(df, window=7):
 def check_sniper_setup(df):
     """
     Logic SMC đã điều chỉnh:
-    - Volume Filter: > 1.5 lần trung bình (Thay vì 2.0)
+    - Volume Filter: > 1.25 lần trung bình (Thay vì 2.0)
     - RR Filter: Sẽ check ở hàm analyze (> 1.5)
     """
     # Lấy nến vừa đóng cửa
@@ -206,7 +206,7 @@ def analyze(symbol, tf):
         vol_ratio = cur_vol / avg_vol if avg_vol > 0 else 0
 
         # --- ĐIỀU KIỆN RR: GIẢM XUỐNG >= 1.5 ---
-        if rr >= 1.5:
+        if rr >= 1.25:
             icon = "🟢 LONG" if signal == "BUY" else "🔴 SHORT"
             
             # Tin nhắn hiển thị đầy đủ Volume và RR
