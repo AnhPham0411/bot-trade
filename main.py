@@ -9,7 +9,7 @@ from datetime import datetime
 # ==========================================
 # --- 1. CẤU HÌNH ---
 # ==========================================
-PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT']
+PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
 
 # Mapping MTF
 MTF_MAPPING = {
