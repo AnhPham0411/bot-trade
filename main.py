@@ -170,7 +170,7 @@ def analyze_with_scoring(symbol, tf):
 
     # Tính toán các chỉ báo phụ trợ
     df['rsi'] = calculate_rsi(df['close'])
-    df['atr'] = calculate_atr(df, length=14) # Thêm ATR để tính TP động
+    df['atr'] = calculate_atr(df, length=14) 
     df = identify_fractals(df)
 
     # 2. Tìm Zone (OB + FVG)
@@ -258,17 +258,53 @@ def analyze_with_scoring(symbol, tf):
         signal_type = "BUY" if htf_trend == "UP" else "SELL"
         strength = "STRONG 🔥" if score >= 3 else "MODERATE ⚠️"
 
-        # --- LOGIC TP VÀ R:R MỚI DỰA TRÊN ATR ---
-        current_atr = df['atr'].iloc[-2] # Lấy ATR của nến vừa đóng
-        atr_multiplier = 2.0 # Hệ số nhân TP (Tùy chỉnh 1.5 - 2.5)
+        risk = abs(zone_entry - zone_sl)
+
+        # --- LOGIC TP KẾT HỢP: CẤU TRÚC + FIBONACCI ---
+        fib_multiplier = 1.618 # Tỷ lệ vàng Fibonacci Extension
+        tp_type = "" # Biến để in ra xem bot đang dùng TP nào
+        tp = 0
 
         if signal_type == "BUY":
-            tp = zone_entry + (current_atr * atr_multiplier)
+            tp_fib = zone_entry + (risk * fib_multiplier) # TP dự phòng theo Fib
+            
+            fractal_highs = df[df['is_fractal_high'] == True]
+            if not fractal_highs.empty:
+                tp_struct = fractal_highs['high'].iloc[-1] # TP theo Đỉnh cũ
+                
+                # Check xem R:R của Đỉnh cũ có "thơm" không (>= 1.5 là ổn)
+                rr_struct = (tp_struct - zone_entry) / risk if risk > 0 else 0
+                
+                if rr_struct < 1.5:
+                    tp = tp_fib
+                    tp_type = "Fib 1.618 (Structure too close)"
+                else:
+                    tp = tp_struct
+                    tp_type = "Fractal High (Liquidity)"
+            else:
+                tp = tp_fib
+                tp_type = "Fib 1.618 (No struct found)"
+
         else: # SELL
-            tp = zone_entry - (current_atr * atr_multiplier)
+            tp_fib = zone_entry - (risk * fib_multiplier)
+            
+            fractal_lows = df[df['is_fractal_low'] == True]
+            if not fractal_lows.empty:
+                tp_struct = fractal_lows['low'].iloc[-1] # TP theo Đáy cũ
+                
+                rr_struct = (zone_entry - tp_struct) / risk if risk > 0 else 0
+                
+                if rr_struct < 1.5:
+                    tp = tp_fib
+                    tp_type = "Fib 1.618 (Structure too close)"
+                else:
+                    tp = tp_struct
+                    tp_type = "Fractal Low (Liquidity)"
+            else:
+                tp = tp_fib
+                tp_type = "Fib 1.618 (No struct found)"
 
         # Tính toán R:R thực tế
-        risk = abs(zone_entry - zone_sl)
         rr = abs(tp - zone_entry) / risk if risk > 0 else 0
 
         # In ra các yếu tố (Confluence)
@@ -282,7 +318,7 @@ def analyze_with_scoring(symbol, tf):
             f"Signal: *{signal_type}*\n"
             f"Entry Zone: `{zone_entry:.4f}`\n"
             f"Stoploss: `{zone_sl:.4f}`\n"
-            f"TP (ATR x{atr_multiplier}): `{tp:.4f}`\n"
+            f"TP ({tp_type}): `{tp:.4f}`\n"
             f"R:R Thực tế: `1:{rr:.2f}`\n"
             f"-----------------\n"
             f"🔍 *Confluences:*\n   + {reasons_str}"
