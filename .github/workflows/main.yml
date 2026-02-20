@@ -1,22 +1,19 @@
-name: Crypto Bot SMC (H1-H4)
+name: Crypto Dual Bot SMC (H1-H4)
 
 on:
   schedule:
-    # --- QUAN TRỌNG ---
-    # Chạy vào phút thứ 10 của mỗi giờ (ví dụ: 00:10, 01:10...) UTC
-    # Lý do: Để nến H1/H4 đóng cửa hoàn toàn (tại phút 00) và sàn cập nhật data xong.
-    - cron: '10 * * * *'
+    # Chạy mỗi 20 phút để bắt kịp nến 15m, 1h và 4h
+    - cron: '*/20 * * * *'
   
-  workflow_dispatch: # Cho phép bấm nút "Run workflow" để test tay
+  workflow_dispatch: # Cho phép chạy tay để test
 
 jobs:
-  run-bot:
+  run-dual-bot:
     runs-on: ubuntu-latest
     
-    # Giới hạn chạy tối đa 10 phút để tiết kiệm tài nguyên
+    # Giới hạn 10 phút để tránh treo runner
     timeout-minutes: 10
     
-    # Quyền đọc code (Best practice)
     permissions:
       contents: read
 
@@ -28,17 +25,23 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: '3.10'
-        cache: 'pip' # Cache lại thư viện giúp bot chạy nhanh hơn từ lần 2
+        cache: 'pip'
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        # Cài đặt chính xác 4 thư viện mà file main.py yêu cầu
-        pip install ccxt pandas numpy requests
+        pip install ccxt pandas numpy requests scikit-learn joblib
 
-    - name: Run Trading Bot
+    # --- CHẠY BOT 1 (Sử dụng Token 1) ---
+    - name: Run Trading Bot 1
       env:
-        # Bot sẽ lấy 2 biến bí mật này từ Settings > Secrets
-        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN_1 }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: python main.py
+
+    # --- CHẠY BOT 2 (Sử dụng Token 2) ---
+    - name: Run Trading Bot 2
+      env:
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN_2 }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: python main2.py
