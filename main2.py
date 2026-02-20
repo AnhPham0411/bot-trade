@@ -23,14 +23,16 @@ MTF_CONFIG = {
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 chat_id = os.getenv('TELEGRAM_CHAT_ID')
-group_chat_id = "-5213535598"
 
-CHAT_IDS = []
-if chat_id: CHAT_IDS.append(chat_id)
-if group_chat_id not in CHAT_IDS: CHAT_IDS.append(group_chat_id)
+# CHỈ GỬI RIÊNG USER ID
+CHAT_IDS = [chat_id] if chat_id else []
 
-exchange = ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'spot'}, 'rateLimit': 1500})
-SCORE_THRESHOLD = 7.5 # Nâng ngưỡng do có thêm AI & Volume Profile
+exchange = ccxt.mexc({
+    'enableRateLimit': True, 
+    'options': {'defaultType': 'spot'}, 
+    'rateLimit': 1500
+})
+SCORE_THRESHOLD = 7.5 
 
 MODEL_PATH = "smc_model.pkl"
 
@@ -114,7 +116,6 @@ def analyze_with_scoring(symbol, tf, model=None):
         df = identify_fractals(df)
         
         t1 = "UP" if df['close'].iloc[-1] > calculate_ema(df['close'], 200).iloc[-1] else "DOWN"
-        if t1 == "SIDEWAY": return False # Logic sideway đã được xử lý ngầm
         
         atr, rsi = calculate_atr(df).iloc[-1], calculate_rsi(df).iloc[-2]
         macd, m_sig, s_k, s_d = calculate_quant_indicators(df)
@@ -138,7 +139,6 @@ def analyze_with_scoring(symbol, tf, model=None):
         if in_zone: score += 2.0; factors.append("Price in Zone (+2)")
 
         if model:
-            # Feature nhị phân chuẩn hóa cho AI
             feat = [[int(v_conf), int(fvg), int(ent < fib_50), int(macd.iloc[-2] > m_sig.iloc[-2]), int(in_zone), int(30 < rsi < 70)]]
             prob = model.predict_proba(feat)[0][1]
             if prob > 0.65: score += 2.0; factors.append(f"AI Power ({prob:.0%}) (+2)")
@@ -165,9 +165,17 @@ def send_telegram(msg):
         try: requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": cid, "text": msg, "parse_mode": "HTML"}, timeout=10)
         except: pass
 
+# ==========================================
+# --- CHƯƠNG TRÌNH CHÍNH ---
+# ==========================================
 if __name__ == "__main__":
     logger.info("=== SMC ANHALGO v8.1 ACTIVE ===")
+    
+    # TIN NHẮN BÁO CÒN SỐNG (HEARTBEAT)
+    send_telegram(f"🚀 <b>AnhAlgo v8.1 Heartbeat</b>\nThời gian: {datetime.now().strftime('%H:%M:%S')}\nTrạng thái: Bot đang quét kèo...")
+    
     model = joblib.load(MODEL_PATH) if os.path.exists(MODEL_PATH) else None
+    
     for s in PAIRS:
         for t in MTF_CONFIG.keys():
             analyze_with_scoring(s, t, model)
