@@ -19,7 +19,9 @@ MTF_MAPPING = {
 }
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-CHAT_IDS = [os.getenv('TELEGRAM_CHAT_ID')]
+chat_id = os.getenv('TELEGRAM_CHAT_ID')
+# Xử lý chat_id None gây crash
+CHAT_IDS = [chat_id] if chat_id else []
 
 exchange = ccxt.mexc({
     'enableRateLimit': True, 
@@ -39,8 +41,11 @@ def calculate_rsi(series, length=14):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=length).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=length).mean()
-    loss = loss.replace(0, np.nan)
-    return 100 - (100 / (1 + (gain / loss)))
+    
+    # Xử lý loss = 0 gây ra NaN
+    rs = gain / loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.fillna(100) # Nếu loss = 0 thì RSI = 100 tuyệt đối
 
 def calculate_atr(df, length=14):
     high_low = df['high'] - df['low']
@@ -53,40 +58,37 @@ def identify_fractals(df):
     """Tìm đỉnh đáy Fractal 5 nến"""
     df['is_fractal_high'] = False
     df['is_fractal_low'] = False
+    
+    # Dùng iloc để tránh IndexError
     for i in range(2, len(df) - 2):
-        if (df['high'][i] > df['high'][i-1] and df['high'][i] > df['high'][i-2] and 
-            df['high'][i] > df['high'][i+1] and df['high'][i] > df['high'][i+2]):
-            df.at[i, 'is_fractal_high'] = True
-        if (df['low'][i] < df['low'][i-1] and df['low'][i] < df['low'][i-2] and 
-            df['low'][i] < df['low'][i+1] and df['low'][i] < df['low'][i+2]):
-            df.at[i, 'is_fractal_low'] = True
+        if (df['high'].iloc[i] > df['high'].iloc[i-1] and df['high'].iloc[i] > df['high'].iloc[i-2] and 
+            df['high'].iloc[i] > df['high'].iloc[i+1] and df['high'].iloc[i] > df['high'].iloc[i+2]):
+            df.at[df.index[i], 'is_fractal_high'] = True
+            
+        if (df['low'].iloc[i] < df['low'].iloc[i-1] and df['low'].iloc[i] < df['low'].iloc[i-2] and 
+            df['low'].iloc[i] < df['low'].iloc[i+1] and df['low'].iloc[i] < df['low'].iloc[i+2]):
+            df.at[df.index[i], 'is_fractal_low'] = True
     return df
 
 def check_fvg(df, idx, direction):
-    """
-    Kiểm tra xem cây nến tại idx (hoặc ngay sau nó) có tạo ra FVG không.
-    """
     if idx + 2 >= len(df): return False
 
-    # FVG Bullish: Low[i+2] > High[i] (Có khoảng trống)
     if direction == "UP":
         candle_1_high = df['high'].iloc[idx]
         candle_3_low = df['low'].iloc[idx + 2]
         if candle_3_low > candle_1_high:
-            return True # Có FVG Tăng
-
-    # FVG Bearish: High[i+2] < Low[i]
+            return True 
     elif direction == "DOWN":
         candle_1_low = df['low'].iloc[idx]
         candle_3_high = df['high'].iloc[idx + 2]
         if candle_3_high < candle_1_low:
-            return True # Có FVG Giảm
-
+            return True 
     return False
 
 def get_htf_trend(symbol, htf):
     try:
-        bars = exchange.fetch_ohlcv(symbol, htf, limit=100)
+        # limit=500 để đủ nến tính EMA200
+        bars = exchange.fetch_ohlcv(symbol, htf, limit=500)
         df = pd.DataFrame(bars, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
         ema_200 = calculate_ema(df['close'], 200).iloc[-1]
         return "UP" if df['close'].iloc[-1] > ema_200 else "DOWN"
@@ -97,10 +99,6 @@ def get_htf_trend(symbol, htf):
 # ==========================================
 
 def find_quality_zone(df, trend):
-    """
-    Tìm vùng Buy/Sell tốt nhất:
-    Trả về: Giá Entry, Giá SL, Có FVG không?
-    """
     zone_price = 0
     zone_sl = 0
     has_fvg = False
@@ -112,7 +110,6 @@ def find_quality_zone(df, trend):
         if fractal_lows.empty: return 0, 0, False
         last_low_idx = fractal_lows.index[-1]
 
-        # Quét nến đỏ gần đáy nhất
         subset = df.iloc[max(0, last_low_idx-3):min(len(df), last_low_idx+3)]
         red_candles = subset[subset['close'] < subset['open']]
 
@@ -120,13 +117,11 @@ def find_quality_zone(df, trend):
             best_ob = red_candles.loc[red_candles['low'].idxmin()]
             ob_idx = df.index.get_loc(best_ob.name)
 
-            zone_price = best_ob['high']
+            # Dùng midpoint thay vì lấy 'high' để Entry tốt hơn (R:R cao hơn)
+            zone_price = (best_ob['high'] + best_ob['low']) / 2
             zone_sl = best_ob['low']
-
-            # Check xem ngay sau OB có FVG không? (Tăng độ uy tín)
             has_fvg = check_fvg(df, ob_idx, "UP")
         else:
-            # Fallback về đáy nếu không thấy nến đỏ
             zone_price = df['low'].iloc[last_low_idx]
             zone_sl = zone_price * 0.995
 
@@ -141,9 +136,9 @@ def find_quality_zone(df, trend):
             best_ob = green_candles.loc[green_candles['high'].idxmax()]
             ob_idx = df.index.get_loc(best_ob.name)
 
-            zone_price = best_ob['low']
+            # Dùng midpoint cho OB giảm
+            zone_price = (best_ob['high'] + best_ob['low']) / 2
             zone_sl = best_ob['high']
-
             has_fvg = check_fvg(df, ob_idx, "DOWN")
         else:
             zone_price = df['high'].iloc[last_high_idx]
@@ -161,6 +156,10 @@ def analyze_with_scoring(symbol, tf):
 
     # 1. Check Trend HTF
     htf_trend = get_htf_trend(symbol, htf)
+    
+    # TINH CHỈNH 1: Bỏ qua ngay nếu HTF đang Sideway
+    if htf_trend == "SIDEWAY": 
+        return
 
     try:
         bars = exchange.fetch_ohlcv(symbol, tf, limit=300)
@@ -168,67 +167,70 @@ def analyze_with_scoring(symbol, tf):
         df['ts'] = pd.to_datetime(df['ts'], unit='ms')
     except: return
 
-    # Tính toán các chỉ báo phụ trợ
     df['rsi'] = calculate_rsi(df['close'])
     df['atr'] = calculate_atr(df, length=14) 
     df = identify_fractals(df)
 
-    # 2. Tìm Zone (OB + FVG)
     zone_entry, zone_sl, has_fvg = find_quality_zone(df, htf_trend)
 
     if zone_entry == 0: 
         print(f"{symbol} ({tf}): No Struct found.")
         return
 
-    curr = df.iloc[-2] # Nến vừa đóng
-    current_price = df.iloc[-1]['close']
+    # Lấy giá trị ATR hiện tại
+    current_atr = df['atr'].iloc[-1]
+    if pd.isna(current_atr): current_atr = zone_entry * 0.005 # Fallback nếu ATR lỗi
 
-    # --- BẮT ĐẦU CHẤM ĐIỂM ---
+    # TINH CHỈNH 2: Thêm ATR Buffer vào Stoploss để chống quét râu
+    if htf_trend == "UP":
+        zone_sl -= (current_atr * 0.5) 
+    elif htf_trend == "DOWN":
+        zone_sl += (current_atr * 0.5)
+
+    curr = df.iloc[-2] # Nến vừa đóng
+    live = df.iloc[-1] # Nến đang chạy
+    current_price = live['close']
+
     score = 0
     factors = []
 
-    # Điểm 1: Trend HTF (Mặc định lọc theo trend nên auto +1 nếu pass)
     score += 1 
     factors.append(f"Trend {htf_trend}")
 
-    # Điểm 2: Chất lượng Zone (Có FVG không?)
     if has_fvg:
         score += 1
         factors.append("SMC Imbalance (FVG)")
     else:
         factors.append("Standard OB")
 
-    # Điểm 3: Giá đã về vùng Entry chưa? (Price Action)
-    # Chấp nhận sai số 0.3%
     in_zone = False
-    tolerance = zone_entry * 0.003
+    
+    # TINH CHỈNH 3 & 4: Dùng ATR làm dung sai & check cả nến Live
+    tolerance = current_atr * 0.5 
 
     if htf_trend == "UP":
-        dist = curr['low'] - zone_entry
-        if dist <= tolerance and curr['close'] > zone_sl:
+        if (curr['low'] <= zone_entry + tolerance and curr['close'] > zone_sl) or \
+           (live['low'] <= zone_entry + tolerance and live['close'] > zone_sl):
             in_zone = True
     elif htf_trend == "DOWN":
-        dist = zone_entry - curr['high']
-        if dist <= tolerance and curr['close'] < zone_sl:
+        if (curr['high'] >= zone_entry - tolerance and curr['close'] < zone_sl) or \
+           (live['high'] >= zone_entry - tolerance and live['close'] < zone_sl):
             in_zone = True
 
     if in_zone:
         score += 1
-        factors.append("Price Tap Zone")
+        factors.append("Price Tap Zone (ATR Adjusted)")
 
-        # Điểm 4: Trigger Nến (Chỉ tính khi đã vào Zone)
         is_trigger = False
         body = abs(curr['close'] - curr['open'])
 
         if htf_trend == "UP":
-            # Pinbar hoặc Engulfing Tăng
             lower_wick = min(curr['open'], curr['close']) - curr['low']
             is_pinbar = lower_wick > body * 1.5
             is_engulfing = (curr['close'] > curr['open']) and (curr['close'] > df.iloc[-3]['high'])
             if is_pinbar or is_engulfing: is_trigger = True
 
         elif htf_trend == "DOWN":
-            # Pinbar hoặc Engulfing Giảm
             upper_wick = curr['high'] - max(curr['open'], curr['close'])
             is_pinbar = upper_wick > body * 1.5
             is_engulfing = (curr['close'] < curr['open']) and (curr['close'] < df.iloc[-3]['low'])
@@ -239,8 +241,6 @@ def analyze_with_scoring(symbol, tf):
             factors.append("Candle Trigger 🔥")
 
     # --- IN KẾT QUẢ ---
-
-    # Status hiển thị
     status_msg = ""
     if in_zone:
         status_msg = f"⚡ IN ZONE (Score: {score}/4)"
@@ -253,61 +253,47 @@ def analyze_with_scoring(symbol, tf):
     SUMMARY_REPORT.append(f"{symbol} {tf}: {status_msg}")
 
     # --- RA QUYẾT ĐỊNH ---
-    # Chỉ báo lệnh nếu Score >= 2
     if in_zone and score >= 2:
         signal_type = "BUY" if htf_trend == "UP" else "SELL"
         strength = "STRONG 🔥" if score >= 3 else "MODERATE ⚠️"
 
         risk = abs(zone_entry - zone_sl)
-
-        # --- LOGIC TP KẾT HỢP: CẤU TRÚC + FIBONACCI ---
-        fib_multiplier = 1.618 # Tỷ lệ vàng Fibonacci Extension
-        tp_type = "" # Biến để in ra xem bot đang dùng TP nào
+        fib_multiplier = 1.618 
+        tp_type = "" 
         tp = 0
 
         if signal_type == "BUY":
-            tp_fib = zone_entry + (risk * fib_multiplier) # TP dự phòng theo Fib
-            
+            tp_fib = zone_entry + (risk * fib_multiplier)
             fractal_highs = df[df['is_fractal_high'] == True]
             if not fractal_highs.empty:
-                tp_struct = fractal_highs['high'].iloc[-1] # TP theo Đỉnh cũ
-                
-                # Check xem R:R của Đỉnh cũ có "thơm" không (>= 1.5 là ổn)
+                tp_struct = fractal_highs['high'].iloc[-1]
                 rr_struct = (tp_struct - zone_entry) / risk if risk > 0 else 0
-                
                 if rr_struct < 1.5:
                     tp = tp_fib
-                    tp_type = "Fib 1.618 (Structure too close)"
+                    tp_type = "Fib 1.618"
                 else:
                     tp = tp_struct
-                    tp_type = "Fractal High (Liquidity)"
+                    tp_type = "Fractal High"
             else:
                 tp = tp_fib
-                tp_type = "Fib 1.618 (No struct found)"
-
-        else: # SELL
+                tp_type = "Fib 1.618"
+        else: 
             tp_fib = zone_entry - (risk * fib_multiplier)
-            
             fractal_lows = df[df['is_fractal_low'] == True]
             if not fractal_lows.empty:
-                tp_struct = fractal_lows['low'].iloc[-1] # TP theo Đáy cũ
-                
+                tp_struct = fractal_lows['low'].iloc[-1]
                 rr_struct = (zone_entry - tp_struct) / risk if risk > 0 else 0
-                
                 if rr_struct < 1.5:
                     tp = tp_fib
-                    tp_type = "Fib 1.618 (Structure too close)"
+                    tp_type = "Fib 1.618"
                 else:
                     tp = tp_struct
-                    tp_type = "Fractal Low (Liquidity)"
+                    tp_type = "Fractal Low"
             else:
                 tp = tp_fib
-                tp_type = "Fib 1.618 (No struct found)"
+                tp_type = "Fib 1.618"
 
-        # Tính toán R:R thực tế
         rr = abs(tp - zone_entry) / risk if risk > 0 else 0
-
-        # In ra các yếu tố (Confluence)
         reasons_str = "\n   + ".join(factors)
 
         msg = (
@@ -317,7 +303,7 @@ def analyze_with_scoring(symbol, tf):
             f"-----------------\n"
             f"Signal: *{signal_type}*\n"
             f"Entry Zone: `{zone_entry:.4f}`\n"
-            f"Stoploss: `{zone_sl:.4f}`\n"
+            f"Stoploss: `{zone_sl:.4f}` (Buffered)\n"
             f"TP ({tp_type}): `{tp:.4f}`\n"
             f"R:R Thực tế: `1:{rr:.2f}`\n"
             f"-----------------\n"
@@ -330,7 +316,7 @@ def analyze_with_scoring(symbol, tf):
 # --- 5. HÀM GỬI TIN & MAIN ---
 # ==========================================
 def send_telegram(msg):
-    if not TELEGRAM_TOKEN: return
+    if not TELEGRAM_TOKEN or not CHAT_IDS: return
     for chat_id in CHAT_IDS:
         try:
             requests.post(
@@ -346,4 +332,4 @@ if __name__ == "__main__":
     for symbol in PAIRS:
         for tf in MTF_MAPPING.keys():
             analyze_with_scoring(symbol, tf)
-            time.sleep(1)
+            time.sleep(1) # Tránh rate limit của sàn
