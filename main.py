@@ -20,7 +20,7 @@ MTF_MAPPING = {
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 user_chat_id = os.getenv('TELEGRAM_CHAT_ID')
-group_chat_id = "-5213535598"
+# group_chat_id = "-5213535598"
 CHAT_IDS = []
 if user_chat_id:
     CHAT_IDS.append(user_chat_id)
