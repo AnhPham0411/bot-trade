@@ -20,7 +20,6 @@ MTF_MAPPING = {
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 chat_id = os.getenv('TELEGRAM_CHAT_ID')
-# Xử lý chat_id None gây crash
 CHAT_IDS = [chat_id] if chat_id else []
 
 exchange = ccxt.mexc({
@@ -42,10 +41,9 @@ def calculate_rsi(series, length=14):
     gain = (delta.where(delta > 0, 0)).rolling(window=length).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=length).mean()
     
-    # Xử lý loss = 0 gây ra NaN
     rs = gain / loss.replace(0, np.nan)
     rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(100) # Nếu loss = 0 thì RSI = 100 tuyệt đối
+    return rsi.fillna(100) 
 
 def calculate_atr(df, length=14):
     high_low = df['high'] - df['low']
@@ -59,7 +57,6 @@ def identify_fractals(df):
     df['is_fractal_high'] = False
     df['is_fractal_low'] = False
     
-    # Dùng iloc để tránh IndexError
     for i in range(2, len(df) - 2):
         if (df['high'].iloc[i] > df['high'].iloc[i-1] and df['high'].iloc[i] > df['high'].iloc[i-2] and 
             df['high'].iloc[i] > df['high'].iloc[i+1] and df['high'].iloc[i] > df['high'].iloc[i+2]):
@@ -87,18 +84,28 @@ def check_fvg(df, idx, direction):
 
 def get_htf_trend(symbol, htf):
     try:
-        # limit=500 để đủ nến tính EMA200
         bars = exchange.fetch_ohlcv(symbol, htf, limit=500)
         df = pd.DataFrame(bars, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
         ema_200 = calculate_ema(df['close'], 200).iloc[-1]
-        return "UP" if df['close'].iloc[-1] > ema_200 else "DOWN"
+        
+        # FINAL FIX 1: Detect SIDEWAY thực tế bằng Price vs EMA200 + ATR
+        df['atr'] = calculate_atr(df, length=14)
+        htf_atr = df['atr'].iloc[-1]
+        current_price = df['close'].iloc[-1]
+        
+        # Nếu giá cách EMA200 nhỏ hơn 1 ATR -> Thị trường đi ngang tích lũy
+        if abs(current_price - ema_200) < htf_atr:
+            return "SIDEWAY"
+            
+        return "UP" if current_price > ema_200 else "DOWN"
     except: return "SIDEWAY"
 
 # ==========================================
 # --- 3. LOGIC TÌM OB + FVG (COMBINED) ---
 # ==========================================
 
-def find_quality_zone(df, trend):
+# FINAL FIX 2: Truyền current_atr vào để xử lý buffer ngay bên trong hàm
+def find_quality_zone(df, trend, current_atr):
     zone_price = 0
     zone_sl = 0
     has_fvg = False
@@ -110,39 +117,39 @@ def find_quality_zone(df, trend):
         if fractal_lows.empty: return 0, 0, False
         last_low_idx = fractal_lows.index[-1]
 
-        subset = df.iloc[max(0, last_low_idx-3):min(len(df), last_low_idx+3)]
+        # FINAL FIX 3: Mở rộng vùng tìm nến đỏ lên 5 nến trước đáy
+        subset = df.iloc[max(0, last_low_idx-5):min(len(df), last_low_idx+3)]
         red_candles = subset[subset['close'] < subset['open']]
 
         if not red_candles.empty:
             best_ob = red_candles.loc[red_candles['low'].idxmin()]
             ob_idx = df.index.get_loc(best_ob.name)
 
-            # Dùng midpoint thay vì lấy 'high' để Entry tốt hơn (R:R cao hơn)
             zone_price = (best_ob['high'] + best_ob['low']) / 2
-            zone_sl = best_ob['low']
+            zone_sl = best_ob['low'] - (current_atr * 0.5) # Merge ATR Buffer
             has_fvg = check_fvg(df, ob_idx, "UP")
         else:
             zone_price = df['low'].iloc[last_low_idx]
-            zone_sl = zone_price * 0.995
+            zone_sl = zone_price - (current_atr * 0.5)
 
     elif trend == "DOWN":
         if fractal_highs.empty: return 0, 0, False
         last_high_idx = fractal_highs.index[-1]
 
-        subset = df.iloc[max(0, last_high_idx-3):min(len(df), last_high_idx+3)]
+        # FINAL FIX 3: Mở rộng vùng tìm nến xanh lên 5 nến trước đỉnh
+        subset = df.iloc[max(0, last_high_idx-5):min(len(df), last_high_idx+3)]
         green_candles = subset[subset['close'] > subset['open']]
 
         if not green_candles.empty:
             best_ob = green_candles.loc[green_candles['high'].idxmax()]
             ob_idx = df.index.get_loc(best_ob.name)
 
-            # Dùng midpoint cho OB giảm
             zone_price = (best_ob['high'] + best_ob['low']) / 2
-            zone_sl = best_ob['high']
+            zone_sl = best_ob['high'] + (current_atr * 0.5) # Merge ATR Buffer
             has_fvg = check_fvg(df, ob_idx, "DOWN")
         else:
             zone_price = df['high'].iloc[last_high_idx]
-            zone_sl = zone_price * 1.005
+            zone_sl = zone_price + (current_atr * 0.5)
 
     return zone_price, zone_sl, has_fvg
 
@@ -154,10 +161,7 @@ def analyze_with_scoring(symbol, tf):
     htf = MTF_MAPPING.get(tf)
     if not htf: return
 
-    # 1. Check Trend HTF
     htf_trend = get_htf_trend(symbol, htf)
-    
-    # TINH CHỈNH 1: Bỏ qua ngay nếu HTF đang Sideway
     if htf_trend == "SIDEWAY": 
         return
 
@@ -171,24 +175,20 @@ def analyze_with_scoring(symbol, tf):
     df['atr'] = calculate_atr(df, length=14) 
     df = identify_fractals(df)
 
-    zone_entry, zone_sl, has_fvg = find_quality_zone(df, htf_trend)
+    # Lấy giá trị ATR hiện tại TRƯỚC khi gọi hàm Zone
+    current_atr = df['atr'].iloc[-1]
+    # Fallback an toàn nếu dính nến lỗi
+    if pd.isna(current_atr) or current_atr == 0: 
+        current_atr = df['close'].iloc[-1] * 0.005 
+
+    zone_entry, zone_sl, has_fvg = find_quality_zone(df, htf_trend, current_atr)
 
     if zone_entry == 0: 
         print(f"{symbol} ({tf}): No Struct found.")
         return
 
-    # Lấy giá trị ATR hiện tại
-    current_atr = df['atr'].iloc[-1]
-    if pd.isna(current_atr): current_atr = zone_entry * 0.005 # Fallback nếu ATR lỗi
-
-    # TINH CHỈNH 2: Thêm ATR Buffer vào Stoploss để chống quét râu
-    if htf_trend == "UP":
-        zone_sl -= (current_atr * 0.5) 
-    elif htf_trend == "DOWN":
-        zone_sl += (current_atr * 0.5)
-
-    curr = df.iloc[-2] # Nến vừa đóng
-    live = df.iloc[-1] # Nến đang chạy
+    curr = df.iloc[-2] 
+    live = df.iloc[-1] 
     current_price = live['close']
 
     score = 0
@@ -204,8 +204,6 @@ def analyze_with_scoring(symbol, tf):
         factors.append("Standard OB")
 
     in_zone = False
-    
-    # TINH CHỈNH 3 & 4: Dùng ATR làm dung sai & check cả nến Live
     tolerance = current_atr * 0.5 
 
     if htf_trend == "UP":
@@ -303,7 +301,7 @@ def analyze_with_scoring(symbol, tf):
             f"-----------------\n"
             f"Signal: *{signal_type}*\n"
             f"Entry Zone: `{zone_entry:.4f}`\n"
-            f"Stoploss: `{zone_sl:.4f}` (Buffered)\n"
+            f"Stoploss: `{zone_sl:.4f}` (ATR Buffered)\n"
             f"TP ({tp_type}): `{tp:.4f}`\n"
             f"R:R Thực tế: `1:{rr:.2f}`\n"
             f"-----------------\n"
@@ -325,11 +323,11 @@ def send_telegram(msg):
         except: pass
 
 if __name__ == "__main__":
-    print(f"\n--- BOT SMC 9.5 (SCORING SYSTEM) ---")
+    print(f"\n--- BOT SMC 10/10 (MASTERPIECE) ---")
     print("Criteria: Trend(1) + OB(1) + FVG(1) + Trigger(1)")
     print("Signal Condition: Score >= 2\n")
 
     for symbol in PAIRS:
         for tf in MTF_MAPPING.keys():
             analyze_with_scoring(symbol, tf)
-            time.sleep(1) # Tránh rate limit của sàn
+            time.sleep(1)
