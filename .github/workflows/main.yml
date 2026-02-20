@@ -1,17 +1,16 @@
-name: Crypto Dual Bot SMC (H1-H4)
+name: Crypto Triple Bot SMC (H1-H4-Live)
 
 on:
   schedule:
-    # Chạy vào phút thứ 10 của mỗi giờ (ví dụ: 01:10, 02:10...)
-    # 24 lần chạy/ngày sẽ giúp bạn sử dụng cực ít phút trong 2,000 phút miễn phí
+    # Chạy vào phút thứ 10 của mỗi giờ
     - cron: '10 * * * *'
   
-  workflow_dispatch: # Cho phép bấm nút chạy tay để test
+  workflow_dispatch: # Nút chạy tay để test
 
 jobs:
-  run-dual-bot:
+  run-multi-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15 # Tăng thêm một chút vì có 3 bot
     
     permissions:
       contents: read
@@ -29,24 +28,28 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install ccxt pandas numpy requests scikit-learn joblib
+        pip install ccxt pandas numpy requests scikit-learn joblib pytz
 
-    # --- CHẠY BOT 1 (main.py) ---
+    # --- CHẠY BOT 1 (Chiến thuật cũ) ---
     - name: Run Trading Bot 1
+      continue-on-error: true
       env:
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: python main.py
 
-    # --- CHẠY BOT 2 (main2.py) ---
+    # --- CHẠY BOT 2 (Chiến thuật cũ 2) ---
     - name: Run Trading Bot 2
+      continue-on-error: true
       env:
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN_1 }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: python main2.py
 
-    - name: Run Trading Bot 2
+    # --- CHẠY BOT 3 (SMC PRO LIMIT - main3.py) ---
+    - name: Run Trading Bot 3
+      continue-on-error: true
       env:
-        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN_1 }}
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN_1 }} # Dùng chung token với Bot 2 hoặc đổi tùy bạn
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: python main3.py
