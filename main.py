@@ -20,8 +20,12 @@ MTF_MAPPING = {
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 chat_id = os.getenv('TELEGRAM_CHAT_ID')
-CHAT_IDS = [chat_id] if chat_id else []
-
+group_chat_id = "-5213535598"
+CHAT_IDS = []
+if user_chat_id:
+    CHAT_IDS.append(user_chat_id)
+if group_chat_id not in CHAT_IDS:
+    CHAT_IDS.append(group_chat_id)
 exchange = ccxt.mexc({
     'enableRateLimit': True, 
     'options': {'defaultType': 'spot'}
