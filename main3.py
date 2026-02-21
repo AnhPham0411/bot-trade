@@ -14,7 +14,7 @@ MTF_MAPPING = {'15m': '1h', '1h': '4h', '4h': '1d'}
 
 SL_ATR_MULTIPLIER = 0.8
 ENTRY_TOLERANCE = 0.5
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN_1')
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 CHAT_IDS = [CHAT_ID] if CHAT_ID else []
 
