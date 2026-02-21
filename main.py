@@ -16,7 +16,7 @@ MTF_MAPPING = {'15m': '1h', '1h': '4h', '4h': '1d'}
 SL_ATR_MULTIPLIER = 0.8  # Nâng SL lên 0.8 ATR
 ENTRY_TOLERANCE = 0.5    # Sai số chạm Zone
 
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN_1') # Đảm bảo đúng tên biến trong GitHub Secrets
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN') # Đảm bảo đúng tên biến trong GitHub Secrets
 CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 CHAT_IDS = [CHAT_ID] if CHAT_ID else []
 
