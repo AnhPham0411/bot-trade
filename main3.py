@@ -15,11 +15,16 @@ MTF_MAPPING = {'15m': '1h', '1h': '4h', '4h': '1d'}
 SL_ATR_MULTIPLIER = 0.8
 ENTRY_TOLERANCE = 0.5
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-CHAT_IDS = [CHAT_ID] if CHAT_ID else []
-
-exchange = ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
-LAST_ALERTED = {}
+group_chat_id = "-5213535598"
+CHAT_IDS = []
+if user_chat_id:
+    CHAT_IDS.append(user_chat_id)
+if group_chat_id not in CHAT_IDS:
+    CHAT_IDS.append(group_chat_id)
+exchange = ccxt.mexc({
+    'enableRateLimit': True, 
+    'options': {'defaultType': 'swap'}
+})
 
 # ==========================================
 # --- 2. HÀM CORE & CHỈ BÁO ---
