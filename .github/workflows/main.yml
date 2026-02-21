@@ -30,13 +30,13 @@ jobs:
         python -m pip install --upgrade pip
         pip install ccxt pandas numpy requests scikit-learn joblib pytz
 
-    # # --- CHẠY BOT 1 (Chiến thuật cũ) ---
-    # - name: Run Trading Bot 1
-    #   continue-on-error: true
-    #   env:
-    #     TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-    #     TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-    #   run: python main.py
+    # --- CHẠY BOT 1 (Chiến thuật cũ) ---
+    - name: Run Trading Bot 1
+      continue-on-error: true
+      env:
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: python main3.py
 
     # --- CHẠY BOT 2 (Chiến thuật cũ 2) ---
     # - name: Run Trading Bot 2
@@ -47,9 +47,9 @@ jobs:
     #   run: python main2.py
 
     # --- CHẠY BOT 3 (SMC PRO LIMIT - main3.py) ---
-    - name: Run Trading Bot 3
-      continue-on-error: true
-      env:
-        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN_1 }} # Dùng chung token với Bot 2 hoặc đổi tùy bạn
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      run: python main3.py
+    # - name: Run Trading Bot 3
+    #   continue-on-error: true
+    #   env:
+    #     TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN_1 }} # Dùng chung token với Bot 2 hoặc đổi tùy bạn
+    #     TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    #   run: python main3.py
