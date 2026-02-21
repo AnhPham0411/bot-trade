@@ -94,7 +94,6 @@ def find_quality_zone(df, trend, current_atr):
             pos = df.index.get_loc(ob.name)
             has_whale = check_whale_vol(df, pos, ob['vol'])
             return (ob['high']+ob['low'])/2, ob['low']-(current_atr*SL_ATR_MULTIPLIER), pos, check_fvg(df, pos, "UP"), has_whale
-        # Fallback fractal
         ob = df.iloc[idx]
         pos = idx
         has_whale = check_whale_vol(df, pos, ob['vol'])
@@ -109,7 +108,6 @@ def find_quality_zone(df, trend, current_atr):
             pos = df.index.get_loc(ob.name)
             has_whale = check_whale_vol(df, pos, ob['vol'])
             return (ob['high']+ob['low'])/2, ob['high']+(current_atr*SL_ATR_MULTIPLIER), pos, check_fvg(df, pos, "DOWN"), has_whale
-        # Fallback fractal
         ob = df.iloc[idx]
         pos = idx
         has_whale = check_whale_vol(df, pos, ob['vol'])
@@ -117,22 +115,20 @@ def find_quality_zone(df, trend, current_atr):
 
     return 0, 0, 0, False, False
 
-# ====================== CÁC BỘ LỌC SMC NÂNG CAO ======================
 def get_swing_range(df):
-    lookback = 120  # 2-4 giờ gần nhất tùy TF
+    lookback = 120  
     swing_high = df['high'].iloc[-lookback:].max()
     swing_low = df['low'].iloc[-lookback:].min()
     return swing_high, swing_low
 
 def is_premium_discount(entry, trend, swing_high, swing_low):
     mid = (swing_high + swing_low) / 2
-    if trend == "UP":   # BUY phải ở Discount (dưới 50%)
+    if trend == "UP":   
         return entry < mid
-    else:               # SELL phải ở Premium (trên 50%)
+    else:               
         return entry > mid
 
 def has_liquidity_sweep(df, ob_idx, trend):
-    """Kiểm tra râu quét fractal cũ trước OB (Quét thanh khoản)"""
     ob_candle = df.iloc[ob_idx]
     if trend == "UP":
         prev_fractals = df[df['is_fractal_low'] & (df.index < ob_idx)]
@@ -167,12 +163,13 @@ def is_trigger_candle(df, idx, signal_type):
     return False, ""
 
 # ==========================================
-# --- 3. ENGINE SMC PRO v5 (Setup Score + Execution) ---
+# --- 3. ENGINE SMC PRO v5.1 ---
 # ==========================================
 def analyze_pair(symbol, tf):
+    """Hàm trả về True nếu bắn được lệnh, False nếu không có lệnh"""
     htf = MTF_MAPPING.get(tf)
     htf_trend = get_htf_trend(symbol, htf)
-    if htf_trend == "SIDEWAY": return
+    if htf_trend == "SIDEWAY": return False
 
     try:
         bars = exchange.fetch_ohlcv(symbol, tf, limit=300)
@@ -183,27 +180,24 @@ def analyze_pair(symbol, tf):
 
         atr = df['atr'].iloc[-2]
         entry, sl, ob_idx, has_fvg, has_whale_vol = find_quality_zone(df, htf_trend, atr)
-        if entry == 0: return
+        if entry == 0: return False
 
         risk = abs(entry - sl)
         tp_mitigation = (entry + risk * 1.618) if htf_trend == "UP" else (entry - risk * 1.618)
-        if not is_ob_fresh(df, ob_idx, sl, tp_mitigation, htf_trend): return
+        if not is_ob_fresh(df, ob_idx, sl, tp_mitigation, htf_trend): return False
 
-        # === BỘ LỌC FRESHNESS ===
         current_price = df['close'].iloc[-2]
         distance_atr = abs(current_price - entry) / atr
         bars_since_ob = len(df) - 2 - ob_idx
-        if distance_atr > 3.0 or bars_since_ob > 15: return
+        if distance_atr > 3.0 or bars_since_ob > 15: return False
 
-        # === BỘ LỌC ANTI-SPAM ===
         key = f"{symbol}_{tf}_{ob_idx}"
-        if key in LAST_ALERTED and time.time() - LAST_ALERTED[key] < 3600: return
+        if key in LAST_ALERTED and time.time() - LAST_ALERTED[key] < 3600: return False
         LAST_ALERTED[key] = time.time()
 
         signal_type = "BUY" if htf_trend == "UP" else "SELL"
 
-        # === SETUP SCORE (MAX 5) ===
-        setup_score = 1  # Trend nền tảng
+        setup_score = 1  
         factors = [f"HTF Trend {htf_trend}"]
         
         if has_fvg:
@@ -213,22 +207,18 @@ def analyze_pair(symbol, tf):
             setup_score += 1
             factors.append("Whale Volume 🐳")
         
-        # RSI Confluence
         rsi = df['rsi'].iloc[-2]
         if (signal_type == "BUY" and rsi < 45) or (signal_type == "SELL" and rsi > 55):
             setup_score += 1
             factors.append(f"RSI {'Oversold' if signal_type=='BUY' else 'Overbought'} ({rsi:.1f})")
         
-        # Premium/Discount Zone
         swing_high, swing_low = get_swing_range(df)
         if is_premium_discount(entry, htf_trend, swing_high, swing_low):
             setup_score += 1
             factors.append("Premium/Discount Zone ✅")
         
-        # Điểm nhấn VIP: Liquidity Sweep
         liquidity_sweep = has_liquidity_sweep(df, ob_idx, htf_trend)
 
-        # === EXECUTION STATUS (TRẠNG THÁI VÀO LỆNH) ===
         last_idx = len(df) - 2
         has_trigger, trigger_name = is_trigger_candle(df, last_idx, signal_type)
         
@@ -238,14 +228,10 @@ def analyze_pair(symbol, tf):
         elif signal_type == "SELL" and df.iloc[-2]['high'] >= (entry - ENTRY_TOLERANCE * atr):
             tapped = True
 
-        if tapped and has_trigger:
-            execution = "CE Triggered 🔥"
-        elif tapped:
-            execution = "Tapped Zone ✅"
-        else:
-            execution = "Waiting Limit ⏳"
+        if tapped and has_trigger: execution = "CE Triggered 🔥"
+        elif tapped: execution = "Tapped Zone ✅"
+        else: execution = "Waiting Limit ⏳"
 
-        # === TP LOGIC (KẾT HỢP FIB 1.618 & THANH KHOẢN ĐỈNH/ĐÁY) ===
         tp_fib = entry + (risk * 1.618) if signal_type == "BUY" else entry - (risk * 1.618)
         tp = tp_fib
         tp_type = "Fib 1.618"
@@ -265,7 +251,6 @@ def analyze_pair(symbol, tf):
                     
         rr = abs(tp - entry) / risk if risk > 0 else 0
 
-        # === XUẤT TIN NHẮN ĐẸP LÊN TELEGRAM ===
         strength = "💎 PERFECT" if setup_score == 5 else "🔥 STRONG" if setup_score >= 3 else "⚠️ MODERATE"
         
         msg = (f"🚀 <b>SMC PRO v5 - {signal_type} {strength}</b>\n"
@@ -283,21 +268,21 @@ def analyze_pair(symbol, tf):
         if liquidity_sweep:
             msg += "\n + Liquidity Sweep (Inducement) 🦈"
         
-        # Khuyến nghị hành động
-        if execution == 'CE Triggered 🔥':
-            action_text = "⚡ VÀO LỆNH MARKET NGAY (Đã có nến đảo chiều xác nhận)!"
-        elif execution == 'Tapped Zone ✅':
-            action_text = "👀 Giá đang chạm vùng Entry, bật chart theo dõi hoặc rải Limit!"
-        else:
-            action_text = "⏳ Cài sẵn LIMIT ngay tại vùng Entry và chờ đợi!"
+        if execution == 'CE Triggered 🔥': action_text = "⚡ VÀO LỆNH MARKET NGAY (Đã có nến đảo chiều xác nhận)!"
+        elif execution == 'Tapped Zone ✅': action_text = "👀 Giá đang chạm vùng Entry, bật chart theo dõi hoặc rải Limit!"
+        else: action_text = "⏳ Cài sẵn LIMIT ngay tại vùng Entry và chờ đợi!"
             
         msg += f"\n\n💡 {action_text}"
 
         send_telegram(msg)
         print(f">>> {symbol} {tf}: {execution} (Setup {setup_score}/5)")
+        
+        # Báo cáo về hàm main là đã tìm thấy 1 tín hiệu
+        return True
 
     except Exception as e:
         print(f"Error {symbol} {tf}: {e}")
+        return False
 
 def send_telegram(msg):
     if not TELEGRAM_TOKEN or not CHAT_IDS: return
@@ -308,12 +293,28 @@ def send_telegram(msg):
         except: pass
 
 # ==========================================
-# --- 4. CHẠY MAIN ---
+# --- 4. CHẠY MAIN CÓ LOGIC BÁO "CÒN SỐNG" ---
 # ==========================================
 if __name__ == "__main__":
-    print(f"🚀 SMC PRO v5 Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    scan_time = datetime.now().strftime('%H:%M:%S')
+    print(f"🚀 SMC PRO v5 Started: {scan_time}")
+    
+    signals_found = 0
+    
     for symbol in PAIRS:
         for tf in MTF_MAPPING.keys():
-            analyze_pair(symbol, tf)
-            time.sleep(1.2)
+            # Nếu analyze_pair trả về True (tức là có lệnh), biến signals_found sẽ cộng 1
+            if analyze_pair(symbol, tf):
+                signals_found += 1
+            time.sleep(1.2) # Chống rate limit của MEXC
+            
+    # Logic Báo "Còn Sống" nếu cả thị trường im ắng
+    if signals_found == 0:
+        alive_msg = (f"🤖 <b>SMC Bot Status: ALIVE 🟢</b>\n"
+                     f"Vừa quét xong lúc <code>{scan_time}</code>\n"
+                     f"Hiện tại thị trường chưa có Setup SMC nào đạt chuẩn và Fresh.\n"
+                     f"<i>P/s: Cứ pha cà phê chờ cá mập tạo thanh khoản nhé! ☕🦈</i>")
+        send_telegram(alive_msg)
+        print(">>> Bot Alive: Sent heartbeat message (0 signals found).")
+        
     print(f"✅ Finished at {datetime.now().strftime('%H:%M:%S')}")
