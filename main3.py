@@ -30,7 +30,7 @@ if group_chat_id and group_chat_id not in CHAT_IDS:
 
 exchange = ccxt.mexc({
     'enableRateLimit': True, 
-    'options': {'defaultType': 'spot'}
+    'options': {'defaultType': 'swap'}
 })
 
 # ==========================================
