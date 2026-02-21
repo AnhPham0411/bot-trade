@@ -32,7 +32,7 @@ exchange = ccxt.mexc({
     'enableRateLimit': True, 
     'options': {'defaultType': 'swap'}
 })
-
+LAST_ALERTED = {}
 # ==========================================
 # --- 2. HÀM CORE & CHỈ BÁO ---
 # ==========================================
