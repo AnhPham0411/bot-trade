@@ -12,13 +12,19 @@ from functools import wraps
 # --- 1. CẤU HÌNH HỆ THỐNG ---
 # ==========================================
 PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
-MTF_MAPPING = {'15m': '1h', '1h': '4h', '4h': '1d'}
+
+# ÉP LA BÀN 4H: Cả 15m và 1h đều phải thuận xu hướng của 4H
+MTF_MAPPING = {'15m': '4h', '1h': '4h'}
 
 SL_ATR_MULTIPLIER = 1.5
 ENTRY_TOLERANCE = 0.5
 WHALE_VOL_MULTIPLIER = 1.5
 MAX_BARS_SINCE_OB = 22          
-STRICT_MODE = True              
+
+# --- BỘ LỌC DYNAMIC TP & SCORING ---
+MIN_SCORE = 4         # Chỉ bắn lệnh từ 4 điểm trở lên
+RR_TIER_2 = 1.67      # Kèo ngon (Score 4, 5)
+RR_TIER_3 = 2.4       # Kèo Unicorn (Score 6, 7)
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 user_chat_id = os.getenv('TELEGRAM_CHAT_ID')
@@ -254,7 +260,7 @@ def is_trigger_candle(df, idx, signal_type):
     return False, ""
 
 # ==========================================
-# --- 5. ENGINE SMC PRO v5.4 (Pure Signal) ---
+# --- 5. ENGINE SMC PRO v5.8 (Dynamic TP) ---
 # ==========================================
 def analyze_pair(symbol, tf):
     htf = MTF_MAPPING.get(tf)
@@ -274,8 +280,45 @@ def analyze_pair(symbol, tf):
     if entry == 0: return False
 
     risk = abs(entry - sl)
-    tp_mitigation = (entry + risk * 2.0) if htf_trend == "UP" else (entry - risk * 2.0)
-    if not is_ob_fresh(df, ob_idx, sl, tp_mitigation, htf_trend): return False
+    
+    # Tính điểm số (Score) trước
+    setup_score = 3  # Base: HTF + BOS + FVG
+    factors = [f"HTF Trend 4H: {htf_trend} ✅", "Valid Break of Structure (BOS) 🏗️", "Confirmed Displacement (FVG) ⚡"]
+
+    if has_whale_vol:
+        setup_score += 1
+        factors.append("Whale Volume 🐳")
+        
+    rsi = df['rsi'].iloc[-2]
+    if (signal_type := "BUY" if htf_trend == "UP" else "SELL") == "BUY" and rsi < 45 or (signal_type == "SELL" and rsi > 55):
+        setup_score += 1
+        factors.append(f"RSI {'Oversold' if signal_type=='BUY' else 'Overbought'} ({rsi:.1f})")
+        
+    if is_premium_discount(entry, htf_trend, *get_swing_range(df)):
+        setup_score += 1
+        factors.append("Premium/Discount Zone 💎")
+
+    liquidity_sweep = has_liquidity_sweep(df, ob_idx, htf_trend)
+    if liquidity_sweep:
+        setup_score += 1
+        factors.append("Liquidity Sweep (Inducement) 🦈")
+
+    # LỌC ĐIỂM SỐ TỐI THIỂU
+    if setup_score < MIN_SCORE: return False
+
+    # DYNAMIC TP LOGIC (Khớp TradingView)
+    if setup_score >= 6:
+        dyn_rr = RR_TIER_3
+        model_name = "🦄 UNICORN SETUP"
+    else:
+        dyn_rr = RR_TIER_2
+        model_name = "🔥 STRONG SETUP"
+
+    tp = entry + (risk * dyn_rr) if signal_type == "BUY" else entry - (risk * dyn_rr)
+    tp1 = entry + risk if signal_type == "BUY" else entry - risk # Mốc 1R
+
+    # Kiểm tra fresh
+    if not is_ob_fresh(df, ob_idx, sl, tp, htf_trend): return False
 
     current_price = df['close'].iloc[-2]
     distance_atr = abs(current_price - entry) / atr
@@ -285,28 +328,6 @@ def analyze_pair(symbol, tf):
     key = f"{symbol}_{tf}_{ob_idx}"
     if state_manager.is_alerted(key): return False
 
-    signal_type = "BUY" if htf_trend == "UP" else "SELL"
-    setup_score = 3  # Base: HTF + BOS + FVG
-    factors = [f"HTF Trend {htf_trend}", "Valid Break of Structure (BOS) 🏗️", "Confirmed Displacement (FVG) ⚡"]
-
-    if has_whale_vol:
-        setup_score += 1
-        factors.append("Whale Volume 🐳")
-    rsi = df['rsi'].iloc[-2]
-    if (signal_type == "BUY" and rsi < 45) or (signal_type == "SELL" and rsi > 55):
-        setup_score += 1
-        factors.append(f"RSI {'Oversold' if signal_type=='BUY' else 'Overbought'} ({rsi:.1f})")
-    if is_premium_discount(entry, htf_trend, *get_swing_range(df)):
-        setup_score += 1
-        factors.append("Premium/Discount Zone ✅")
-
-    liquidity_sweep = has_liquidity_sweep(df, ob_idx, htf_trend)
-    is_unicorn = False
-    if liquidity_sweep:
-        setup_score += 1
-        factors.append("Liquidity Sweep (Inducement) 🦈")
-        is_unicorn = True
-
     last_idx = len(df) - 2
     has_trigger, trigger_name = is_trigger_candle(df, last_idx, signal_type)
 
@@ -314,42 +335,28 @@ def analyze_pair(symbol, tf):
     if signal_type == "BUY" and df.iloc[-2]['low'] <= (entry + ENTRY_TOLERANCE * atr): tapped = True
     elif signal_type == "SELL" and df.iloc[-2]['high'] >= (entry - ENTRY_TOLERANCE * atr): tapped = True
 
-    if tapped and has_trigger: execution = "CE Triggered 🔥"
-    elif tapped: execution = "Tapped Zone ✅"
+    if tapped and has_trigger: execution = "CE Triggered ⚡"
+    elif tapped: execution = "Tapped Zone 👀"
     else: execution = "Waiting Limit ⏳"
 
-    tp_fib = entry + (risk * 2.0) if signal_type == "BUY" else entry - (risk * 2.0)
-    tp, tp_type = tp_fib, "Fib 2.0 (An toàn)"
-
-    if is_unicorn or setup_score >= 6:
-        model_name = "🦄 UNICORN SETUP"
-    elif setup_score >= 4:
-        model_name = "🔥 STRONG SETUP"
-    else:
-        model_name = "⚡ VALID SETUP"
-
-    # Chỉ tính R:R để báo cáo, không tính size lệnh nữa
-    rr = abs(tp - entry) / risk if risk > 0 else 0
-
-    msg = (f"🚀 <b>SMC PRO v5.4 - {signal_type} {model_name}</b>\n"
+    msg = (f"🚀 <b>SMC PRO v5.8 - {signal_type} {model_name}</b>\n"
            f"Symbol: <b>{symbol}</b> ({tf}) | Age: {bars_since_ob} bars\n"
            f"-----------------\n"
-           f"Setup Score: <b>{setup_score}/7</b>\n"
+           f"Score: <b>{setup_score}/7</b>\n"
            f"Execution: <b>{execution}</b>\n"
            f"Entry Zone: <code>{entry:.4f}</code>\n"
            f"Stoploss: <code>{sl:.4f}</code>\n"
-           f"Take Profit ({tp_type}): <code>{tp:.4f}</code>\n"
-           f"R:R: <b>1:{rr:.2f}</b>\n"
+           f"Target ({dyn_rr}R): <code>{tp:.4f}</code>\n"
            f"-----------------\n"
-           f"🔍 Setup Confluences:\n + " + "\n + ".join(factors))
+           f"🛡️ <b>Quản trị Lệnh:</b>\n"
+           f"1. Cài Limit tại Entry.\n"
+           f"2. Chạm 1R (<code>{tp1:.4f}</code>) -> Chốt 50% & Dời SL Hòa.\n"
+           f"3. Thả trôi tới Target {dyn_rr}R.\n"
+           f"-----------------\n"
+           f"🔍 Confluences:\n + " + "\n + ".join(factors))
 
-    if execution == 'CE Triggered 🔥': action_text = "⚡ VÀO LỆNH MARKET NGAY!"
-    elif execution == 'Tapped Zone ✅': action_text = "👀 Đang test vùng Entry, tìm tín hiệu đảo chiều!"
-    else: action_text = "⏳ Cài LIMIT ngay tại Entry."
-
-    msg += f"\n\n💡 {action_text}"
     send_telegram(msg)
-    print(f">>> {symbol} {tf}: {execution} ({model_name} - Score {setup_score}/7)")
+    print(f">>> {symbol} {tf}: {execution} ({model_name} - Target {dyn_rr}R)")
     return True
 
 def send_telegram(msg):
@@ -366,7 +373,7 @@ def send_telegram(msg):
 # ==========================================
 if __name__ == "__main__":
     scan_time = datetime.now().strftime('%H:%M:%S')
-    print(f"🚀 SMC PRO v5.4 Started: {scan_time}")
+    print(f"🚀 SMC PRO v5.8 Started: {scan_time}")
     
     signals_found = 0
     for symbol in PAIRS:
@@ -378,8 +385,8 @@ if __name__ == "__main__":
     if signals_found == 0:
         alive_msg = (f"🤖 <b>SMC Bot Status: ALIVE 🟢</b>\n"
                      f"Time: <code>{scan_time}</code>\n"
-                     f"Thị trường đang im ắng. Chưa có setup nào đạt chuẩn hôm nay.\n"
-                     f"<i>P/s: Cứ pha cà phê chờ cá mập tạo thanh khoản nhé! ☕🦈</i>")
+                     f"La bàn 4H đang không đồng thuận hoặc chưa có Setup >= 4 điểm.\n"
+                     f"<i>P/s: Chờ Cá mập dọn đường nhé! ☕🦈</i>")
         send_telegram(alive_msg)
         print(">>> Bot Alive: Sent heartbeat.")
         
