@@ -401,7 +401,7 @@ if __name__ == "__main__":
             time.sleep(1.2)
             
     if signals_found == 0:
-        alive_msg = (f"🤖 <b>SMC Bot Status: ALIVE 🟢</b>\n"
+        alive_msg = (f"🤖 <b>SMC Bot 5 Status: ALIVE 🟢</b>\n"
                      f"Time: <code>{scan_time}</code>\n"
                      f"Khung 4H đang không đồng thuận hoặc chưa có Setup xịn.\n"
                      f"<i>P/s: Chờ Cá mập dọn đường nhé! ☕🦈</i>")
