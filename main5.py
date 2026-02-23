@@ -356,7 +356,7 @@ def analyze_pair(symbol, tf):
 
     execution = "Tapped Zone 👀" if tapped else "Waiting Limit ⏳"
 
-    msg = (f"🚀 <b>SMC PRO v6.3 - {signal_type} {model_name}</b>\n"
+    msg = (f"🚀 <b>SMC PRO v6.3 main5- {signal_type} {model_name}</b>\n"
            f"Symbol: <b>{symbol}</b> ({tf}) | Age: {bars_since_ob} bars\n"
            f"-----------------\n"
            f"Score: <b>{setup_score}/7</b>\n"
