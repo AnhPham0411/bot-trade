@@ -53,3 +53,13 @@ jobs:
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN_1 }} # Dùng chung token với Bot 2 hoặc đổi tùy bạn
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: python main5.py
+
+    # --- CHẠY BOT 3 (SMC PRO LIMIT - main5.py) ---
+    - name: Run Trading Bot 4
+      continue-on-error: true
+      env:
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN_1 }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        GH_GIST_TOKEN: ${{ secrets.GH_GIST_TOKEN }} # Cấp quyền cho Gist
+        GIST_ID: ${{ secrets.GIST_ID }}             # ID của file Gist
+      run: python main6.py
