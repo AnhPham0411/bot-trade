@@ -47,9 +47,9 @@ jobs:
       run: python main4.py
 
     # --- CHẠY BOT 3 (SMC PRO LIMIT - main3.py) ---
-    # - name: Run Trading Bot 3
-    #   continue-on-error: true
-    #   env:
-    #     TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN_1 }} # Dùng chung token với Bot 2 hoặc đổi tùy bạn
-    #     TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-    #   run: python main3.py
+    - name: Run Trading Bot 3
+      continue-on-error: true
+      env:
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN_1 }} # Dùng chung token với Bot 2 hoặc đổi tùy bạn
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: python main5.py
