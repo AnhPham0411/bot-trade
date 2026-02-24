@@ -38,7 +38,7 @@ jobs:
     #     TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
     #   run: python main3.py
 
-    # # --- CHẠY BOT 2 (Chiến thuật cũ 2) ---
+    # # --- CHẠY BOT 2 (Chiến thuật cũ 2) --- unicorn setup
     - name: Run Trading Bot 2
       continue-on-error: true
       env:
