@@ -11,6 +11,10 @@ from functools import wraps
 # ==========================================
 # --- 1. CẤU HÌNH (GitHub Actions) ---
 # ==========================================
+ENABLE_ANTI_SPAM = True   # Đổi thành False nếu bạn muốn TẮT chống spam (để test hoặc ép bot báo lại lệnh cũ)
+ENABLE_ALERTS = True      # Bật/tắt toàn bộ tin nhắn Telegram
+ENABLE_HEARTBEAT = False  # Bật/tắt tin nhắn "ALIVE" mỗi lần quét
+
 PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
 MTF_MAPPING = {'1h': '4h'}
 
@@ -52,7 +56,8 @@ class GistStateManager:
                 files = r.json().get('files', {})
                 if self.filename in files:
                     return json.loads(files[self.filename]['content'])
-        except: pass
+        except Exception as e: 
+            print(f"⚠️ Lỗi đọc Gist: {e}")
         return {}
 
     def save(self):
@@ -61,7 +66,8 @@ class GistStateManager:
             url = f"https://api.github.com/gists/{self.gist_id}"
             payload = {"files": {self.filename: {"content": json.dumps(self.state, indent=2)}}}
             requests.patch(url, headers=self.headers, json=payload, timeout=10)
-        except: pass
+        except Exception as e:
+            print(f"⚠️ Lỗi lưu Gist: {e}")
 
     def is_alerted(self, key, cooldown=3500):
         now = time.time()
@@ -101,7 +107,7 @@ def calculate_atr(df, length=14):
     return pd.concat([hl, hc, lc], axis=1).max(axis=1).rolling(window=length).mean()
 
 def get_htf_trend(symbol, htf):
-    bars = fetch_ohlcv_safe(symbol, htf, limit=300)  # FIX EMA 200
+    bars = fetch_ohlcv_safe(symbol, htf, limit=1000)
     if not bars: return "SIDEWAY"
     df = pd.DataFrame(bars, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
     ema_200 = df['close'].ewm(span=200, adjust=False).mean().iloc[-2]
@@ -113,24 +119,27 @@ def get_htf_trend(symbol, htf):
 # ==========================================
 # --- 4. MODULE LOGIC ---
 # ==========================================
-def analyze_smc(closed_df, lookback=12):
+def analyze_smc(closed_df, lookback=20): 
     recent = closed_df.iloc[-lookback:]
-    roll_high = recent['high'].rolling(3, center=True).max().dropna()
-    roll_low  = recent['low'].rolling(3, center=True).min().dropna()
+    roll_high = recent['high'].rolling(5, center=True).max().dropna()
+    roll_low  = recent['low'].rolling(5, center=True).min().dropna()
+    
     swing_high = roll_high.iloc[-1] if not roll_high.empty else recent['high'].max()
     swing_low  = roll_low.iloc[-1]  if not roll_low.empty  else recent['low'].min()
     current = closed_df.iloc[-1]
+    
     trend = "BULLISH" if current['close'] > swing_high else "BEARISH" if current['close'] < swing_low else "NEUTRAL"
     return {"trend": trend, "swing_high": swing_high, "swing_low": swing_low}
 
 def analyze_ict(closed_df):
-    now_utc = datetime.now(timezone.utc)
-    est_hour = (now_utc - timedelta(hours=5)).hour
+    c1 = closed_df.iloc[-3]  
+    c2 = closed_df.iloc[-2]  
+    c3 = closed_df.iloc[-1]  
+    
+    candle_time = datetime.fromtimestamp(c3['ts'] / 1000, tz=timezone.utc)
+    est_hour = (candle_time - timedelta(hours=5)).hour
     is_killzone = (9 <= est_hour <= 11) or (2 <= est_hour <= 5)
     
-    c1 = closed_df.iloc[-3]  # cũ
-    c2 = closed_df.iloc[-2]  # giữa
-    c3 = closed_df.iloc[-1]  # mới nhất
     is_bullish_fvg = c3['low'] > c1['high'] and c2['close'] > c2['open']
     is_bearish_fvg = c3['high'] < c1['low']  and c2['close'] < c2['open']
     fvg_status = "BULLISH" if is_bullish_fvg else "BEARISH" if is_bearish_fvg else "NONE"
@@ -141,10 +150,13 @@ def analyze_volume_pa(closed_df):
     prev = closed_df.iloc[-2]
     avg_vol = closed_df['vol'].iloc[-20:].mean()
     is_volume_spike = current['vol'] > avg_vol * 2
-    is_bull_eng = (prev['close'] < prev['open'] and current['close'] > current['open'] and
-                   current['close'] > prev['open'] and current['open'] < prev['close'])
-    is_bear_eng = (prev['close'] > prev['open'] and current['close'] < current['open'] and
-                   current['close'] < prev['open'] and current['open'] > prev['close'])
+    
+    is_bull_eng = (prev['close'] <= prev['open'] and current['close'] > current['open'] and
+                   current['close'] >= prev['open'] and current['open'] <= prev['close'])
+    
+    is_bear_eng = (prev['close'] >= prev['open'] and current['close'] < current['open'] and
+                   current['close'] <= prev['open'] and current['open'] >= prev['close'])
+                   
     pattern = "BULLISH_ENGULFING" if is_bull_eng else "BEARISH_ENGULFING" if is_bear_eng else "NONE"
     return {"is_volume_spike": is_volume_spike, "pattern": pattern}
 
@@ -199,8 +211,10 @@ def analyze_pair(symbol, tf):
     model_name = "🦄 UNICORN" if score >= 6 else "🔥 STRONG"
     tp = entry + risk * dyn_rr if signal_type == "BUY" else entry - risk * dyn_rr
 
-    key = f"{symbol}_{tf}_{closed_df['ts'].iloc[-1]}"
-    if state_manager.is_alerted(key): return False
+    # CƠ CHẾ CHỐNG SPAM: Nếu biến ENABLE_ANTI_SPAM = True mới check
+    if ENABLE_ANTI_SPAM:
+        key = f"{symbol}_{tf}_{closed_df['ts'].iloc[-1]}"
+        if state_manager.is_alerted(key): return False
 
     msg = (f"🚀 <b>SMC Action Bot v6.6 - {signal_type} {model_name}</b>\n"
            f"Symbol: <b>{symbol}</b> ({tf})\n"
@@ -215,7 +229,7 @@ def analyze_pair(symbol, tf):
     return True
 
 def send_telegram(msg):
-    if not TELEGRAM_TOKEN: return
+    if not ENABLE_ALERTS or not TELEGRAM_TOKEN: return
     for cid in CHAT_IDS:
         if not cid: continue
         try:
@@ -238,10 +252,10 @@ if __name__ == "__main__":
                 signals_found += 1
             time.sleep(0.8)
 
-    # Heartbeat luôn gửi
-    heartbeat = (f"🤖 <b>SMC Action Bot v6.6 - ALIVE 🟢</b>\n"
-                 f"Time: <code>{start_time}</code>\n"
-                 f"Quét {len(PAIRS)} pair • Tìm thấy <b>{signals_found}</b> signal")
-    send_telegram(heartbeat)
+    if ENABLE_HEARTBEAT:
+        heartbeat = (f"🤖 <b>SMC Action Bot v6.6 - ALIVE 🟢</b>\n"
+                     f"Time: <code>{start_time}</code>\n"
+                     f"Quét {len(PAIRS)} pair • Tìm thấy <b>{signals_found}</b> signal")
+        send_telegram(heartbeat)
 
     print(f"✅ Finished at {datetime.now().strftime('%H:%M:%S')} - {signals_found} signal(s)")
