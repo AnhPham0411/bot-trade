@@ -11,7 +11,7 @@ from functools import wraps
 # ==========================================
 # --- 1. CẤU HÌNH (GitHub Actions) ---
 # ==========================================
-ENABLE_ANTI_SPAM = True   # Đổi thành False nếu bạn muốn TẮT chống spam (để test hoặc ép bot báo lại lệnh cũ)
+ENABLE_ANTI_SPAM = False   # Đổi thành False nếu bạn muốn TẮT chống spam (để test hoặc ép bot báo lại lệnh cũ)
 ENABLE_ALERTS = True      # Bật/tắt toàn bộ tin nhắn Telegram
 ENABLE_HEARTBEAT = True  # Bật/tắt tin nhắn "ALIVE" mỗi lần quét
 
