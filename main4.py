@@ -247,7 +247,7 @@ def is_ob_fresh(df, ob_idx, sl, tp, trend):
     return True
 
 def get_swing_range(df):
-    lookback = 120  
+    lookback = 300  
     return df['high'].iloc[-lookback:].max(), df['low'].iloc[-lookback:].min()
 
 def is_premium_discount(entry, trend, swing_high, swing_low):
@@ -281,7 +281,7 @@ def analyze_pair(symbol, tf):
     htf_trend = get_htf_trend(symbol, htf)
     if htf_trend == "SIDEWAY": return False
 
-    bars = fetch_ohlcv_safe(symbol, tf, limit=300)
+    bars = fetch_ohlcv_safe(symbol, tf, limit=1000)
     if not bars: return False
 
     df = pd.DataFrame(bars, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
