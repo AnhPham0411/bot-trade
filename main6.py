@@ -13,7 +13,7 @@ from functools import wraps
 # ==========================================
 ENABLE_ANTI_SPAM = True   # Đổi thành False nếu bạn muốn TẮT chống spam (để test hoặc ép bot báo lại lệnh cũ)
 ENABLE_ALERTS = True      # Bật/tắt toàn bộ tin nhắn Telegram
-ENABLE_HEARTBEAT = False  # Bật/tắt tin nhắn "ALIVE" mỗi lần quét
+ENABLE_HEARTBEAT = True  # Bật/tắt tin nhắn "ALIVE" mỗi lần quét
 
 PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
 MTF_MAPPING = {'1h': '4h'}
