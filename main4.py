@@ -26,6 +26,10 @@ MIN_SCORE = 4         # Chỉ bắn lệnh từ 4 điểm trở lên
 RR_TIER_2 = 1.67      # Kèo ngon (Score 4, 5)
 RR_TIER_3 = 2.4       # Kèo Unicorn (Score 6, 7)
 
+# --- CẤU HÌNH TÍNH NĂNG ---
+ENABLE_ORDER_ANTISPAM = False  # True: Chống bắn lặp lại cùng 1 lệnh. False: Tắt chống spam (thỏa mãn là bắn liên tục).
+ENABLE_HEARTBEAT = True      # True: Thi thoảng báo bot "còn sống" khi không có kèo.
+
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 user_chat_id = os.getenv('TELEGRAM_CHAT_ID')
 group_chat_id = "-5213535598"
@@ -135,27 +139,37 @@ def identify_fractals(df):
     return df
 
 def check_fvg(df, idx, direction):
-    try:
-        if direction == "UP": return df['low'].iloc[idx + 2] > df['high'].iloc[idx]
-        return df['high'].iloc[idx + 2] < df['low'].iloc[idx]
-    except: return False
+    if idx + 2 >= len(df): 
+        return False
+        
+    if direction == "UP": 
+        return df['low'].iloc[idx + 2] > df['high'].iloc[idx]
+    return df['high'].iloc[idx + 2] < df['low'].iloc[idx]
 
 def check_bos_choch(df, current_idx, trend, lookback_bars=30):
-    try:
-        if trend == "UP":
-            prev_highs = df[df['is_fractal_high'] & (df.index < current_idx - 3)]
-            if prev_highs.empty: return False
-            recent_high = prev_highs['high'].iloc[-1]
-            check_range = df.iloc[current_idx : current_idx + lookback_bars]
-            return (check_range['close'] > recent_high).any()
-            
-        elif trend == "DOWN":
-            prev_lows = df[df['is_fractal_low'] & (df.index < current_idx - 3)]
-            if prev_lows.empty: return False
-            recent_low = prev_lows['low'].iloc[-1]
-            check_range = df.iloc[current_idx : current_idx + lookback_bars]
-            return (check_range['close'] < recent_low).any()
-    except: return False
+    if current_idx >= len(df):
+        return False
+        
+    end_idx = min(current_idx + lookback_bars, len(df))
+    check_range = df.iloc[current_idx : end_idx]
+    
+    if check_range.empty: 
+        return False
+
+    if trend == "UP":
+        prev_highs = df[df['is_fractal_high'] & (df.index < current_idx - 3)]
+        if prev_highs.empty: 
+            return False
+        recent_high = prev_highs['high'].iloc[-1]
+        return (check_range['close'] > recent_high).any()
+        
+    elif trend == "DOWN":
+        prev_lows = df[df['is_fractal_low'] & (df.index < current_idx - 3)]
+        if prev_lows.empty: 
+            return False
+        recent_low = prev_lows['low'].iloc[-1]
+        return (check_range['close'] < recent_low).any()
+        
     return False
 
 def has_liquidity_sweep(df, ob_idx, trend):
@@ -325,8 +339,10 @@ def analyze_pair(symbol, tf):
     bars_since_ob = len(df) - 2 - ob_idx
     if distance_atr > 3.0 or bars_since_ob > MAX_BARS_SINCE_OB: return False
 
+    # BẬT/TẮT CHỐNG SPAM LỆNH Ở ĐÂY
     key = f"{symbol}_{tf}_{ob_idx}"
-    if state_manager.is_alerted(key): return False
+    if ENABLE_ORDER_ANTISPAM:
+        if state_manager.is_alerted(key): return False
 
     last_idx = len(df) - 2
     has_trigger, trigger_name = is_trigger_candle(df, last_idx, signal_type)
@@ -339,11 +355,15 @@ def analyze_pair(symbol, tf):
     elif tapped: execution = "Tapped Zone 👀"
     else: execution = "Waiting Limit ⏳"
 
+    # Xử lý chuỗi Trigger Candle (Chỉ hiện khi có mẫu hình nến)
+    trigger_info = f"🕯️ Trigger: <b>{trigger_name}</b>\n" if has_trigger else ""
+
     msg = (f"🚀 <b>SMC PRO v5.8 - {signal_type} {model_name}</b>\n"
            f"Symbol: <b>{symbol}</b> ({tf}) | Age: {bars_since_ob} bars\n"
            f"-----------------\n"
            f"Score: <b>{setup_score}/7</b>\n"
            f"Execution: <b>{execution}</b>\n"
+           f"{trigger_info}"
            f"Entry Zone: <code>{entry:.4f}</code>\n"
            f"Stoploss: <code>{sl:.4f}</code>\n"
            f"Target ({dyn_rr}R): <code>{tp:.4f}</code>\n"
@@ -382,7 +402,7 @@ if __name__ == "__main__":
                 signals_found += 1
             time.sleep(1.2)
             
-    if signals_found == 0:
+    if signals_found == 0 and ENABLE_HEARTBEAT:
         alive_msg = (f"🤖 <b>SMC Bot Status 4: ALIVE 🟢</b>\n"
                      f"Time: <code>{scan_time}</code>\n"
                      f"La bàn 4H đang không đồng thuận hoặc chưa có Setup >= 4 điểm.\n"
