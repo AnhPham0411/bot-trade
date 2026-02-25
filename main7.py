@@ -34,7 +34,7 @@ RR_TIER_2 = 1.67      # Kèo ngon (Score 4, 5)
 RR_TIER_3 = 2.4       # Kèo Unicorn (Score 6, 7)
 
 # --- CẤU HÌNH TÍNH NĂNG (BẬT/TẮT) ---
-ENABLE_ORDER_ANTISPAM = True  # True: Chống bắn lặp lại cùng 1 lệnh. False: Bắn liên tục.
+ENABLE_ORDER_ANTISPAM = False  # True: Chống bắn lặp lại cùng 1 lệnh. False: Bắn liên tục.
 ENABLE_HEARTBEAT = True      # True: Báo bot "còn sống" khi không có kèo.
 ENABLE_KILLZONES = False       # True: Chỉ trade phiên London (14h-17h VN) & New York (19h-22h VN).
 
