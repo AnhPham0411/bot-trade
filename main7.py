@@ -14,7 +14,6 @@ from functools import wraps
 PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
 
 # ÉP LA BÀN ĐA KHUNG THỜI GIAN (MTF):
-# 15m đánh theo xu hướng 1h | 1h đánh theo xu hướng 4h | 4h đánh theo xu hướng 1d
 MTF_MAPPING = {'15m': '1h', '1h': '4h', '4h': '1d'}
 
 SL_ATR_MULTIPLIER = 1.5
@@ -23,20 +22,20 @@ WHALE_VOL_MULTIPLIER = 1.5
 
 # GIỚI HẠN TUỔI THỌ ORDER BLOCK THEO TỪNG KHUNG GIỜ
 MAX_BARS_LIMITS = {
-    '15m': 30,  # Chờ tối đa 30 nến (7.5 tiếng)
-    '1h': 72,   # Chờ tối đa 72 nến (3 ngày)
-    '4h': 50    # Chờ tối đa 50 nến (~8.3 ngày)
+    '15m': 30,  
+    '1h': 72,   
+    '4h': 50    
 }
 
 # --- BỘ LỌC DYNAMIC TP & SCORING ---
-MIN_SCORE = 4         # Chỉ bắn lệnh từ 4 điểm trở lên
-RR_TIER_2 = 1.67      # Kèo ngon (Score 4, 5)
-RR_TIER_3 = 2.4       # Kèo Unicorn (Score 6, 7)
+MIN_SCORE = 4         
+RR_TIER_2 = 1.67      
+RR_TIER_3 = 2.4       
 
 # --- CẤU HÌNH TÍNH NĂNG (BẬT/TẮT) ---
-ENABLE_ORDER_ANTISPAM = False  # True: Chống bắn lặp lại cùng 1 lệnh. False: Bắn liên tục.
-ENABLE_HEARTBEAT = True      # True: Báo bot "còn sống" khi không có kèo.
-ENABLE_KILLZONES = False       # True: Chỉ trade phiên London (14h-17h VN) & New York (19h-22h VN).
+ENABLE_ORDER_ANTISPAM = True  
+ENABLE_HEARTBEAT = True      
+ENABLE_KILLZONES = False       
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 user_chat_id = os.getenv('TELEGRAM_CHAT_ID')
@@ -72,7 +71,7 @@ class GistStateManager:
                 if self.filename in files:
                     return json.loads(files[self.filename]['content'])
         except Exception as e:
-            print(f"Lỗi đọc Gist: {e}")
+            pass
         return {}
 
     def save(self):
@@ -82,7 +81,7 @@ class GistStateManager:
             payload = {"files": {self.filename: {"content": json.dumps(self.state, indent=2)}}}
             requests.patch(url, headers=self.headers, json=payload, timeout=10)
         except Exception as e:
-            print(f"Lỗi lưu Gist: {e}")
+            pass
 
     def is_alerted(self, key, cooldown=4000):
         now = time.time()
@@ -105,7 +104,6 @@ def retry_api(retries=3, delay=2):
                 try:
                     return func(*args, **kwargs)
                 except Exception as e:
-                    print(f"⚠️ API Error ({func.__name__}) - Attempt {attempt+1}/{retries}: {e}")
                     time.sleep(delay)
             return None
         return wrapper
@@ -116,7 +114,7 @@ def fetch_ohlcv_safe(symbol, tf, limit):
     return exchange.fetch_ohlcv(symbol, tf, limit=limit)
 
 # ==========================================
-# --- 4. HÀM CORE & CHỈ BÁO ---
+# --- 4. HÀM CORE & LỖI LOGIC ĐÃ FIX ---
 # ==========================================
 def calculate_ema(series, length):
     return series.ewm(span=length, adjust=False).mean()
@@ -146,11 +144,17 @@ def identify_fractals(df):
                            (df['low'].shift(2) < df['low'])
     return df
 
-def check_fvg(df, idx, direction):
-    if idx + 2 >= len(df): return False
-    if direction == "UP": return df['low'].iloc[idx + 2] > df['high'].iloc[idx]
-    return df['high'].iloc[idx + 2] < df['low'].iloc[idx]
+# [FIXED] FVG CÓ THỂ XUẤT HIỆN TRONG 3 NẾN SAU OB
+def check_fvg(df, ob_idx, direction):
+    end_idx = min(ob_idx + 4, len(df) - 1)
+    for i in range(ob_idx + 1, end_idx):
+        if direction == "UP":
+            if df['low'].iloc[i + 1] > df['high'].iloc[i - 1]: return True
+        else:
+            if df['high'].iloc[i + 1] < df['low'].iloc[i - 1]: return True
+    return False
 
+# [FIXED] LỌC FAKEOUT BOS (YÊU CẦU ĐÓNG NẾN UY TÍN BẰNG BODY)
 def check_bos_choch(df, current_idx, trend, lookback_bars=30):
     if current_idx >= len(df): return False
     end_idx = min(current_idx + lookback_bars, len(df))
@@ -160,23 +164,38 @@ def check_bos_choch(df, current_idx, trend, lookback_bars=30):
     if trend == "UP":
         prev_highs = df[df['is_fractal_high'] & (df.index < current_idx - 3)]
         if prev_highs.empty: return False
-        return (check_range['close'] > prev_highs['high'].iloc[-1]).any()
+        peak = prev_highs['high'].iloc[-1]
+        
+        break_candles = check_range[check_range['close'] > peak]
+        for _, candle in break_candles.iterrows():
+            body = abs(candle['close'] - candle['open'])
+            upper_wick = candle['high'] - max(candle['close'], candle['open'])
+            if body > upper_wick: return True # Body đóng qua đỉnh lớn hơn râu trên
+        return False
+        
     elif trend == "DOWN":
         prev_lows = df[df['is_fractal_low'] & (df.index < current_idx - 3)]
         if prev_lows.empty: return False
-        return (check_range['close'] < prev_lows['low'].iloc[-1]).any()
+        valley = prev_lows['low'].iloc[-1]
+        
+        break_candles = check_range[check_range['close'] < valley]
+        for _, candle in break_candles.iterrows():
+            body = abs(candle['close'] - candle['open'])
+            lower_wick = min(candle['close'], candle['open']) - candle['low']
+            if body > lower_wick: return True # Body đóng qua đáy lớn hơn râu dưới
+        return False
     return False
 
 def has_liquidity_sweep(df, ob_idx, trend):
     if trend == "UP":
         prev_fractals = df[df['is_fractal_low'] & (df.index < ob_idx)]
         if prev_fractals.empty: return False
-        check_range = df.iloc[max(0, ob_idx-5):ob_idx]
+        check_range = df.iloc[max(0, ob_idx-5):ob_idx+1]
         return (check_range['low'] < prev_fractals['low'].iloc[-1]).any()
     else:
         prev_fractals = df[df['is_fractal_high'] & (df.index < ob_idx)]
         if prev_fractals.empty: return False
-        check_range = df.iloc[max(0, ob_idx-5):ob_idx]
+        check_range = df.iloc[max(0, ob_idx-5):ob_idx+1]
         return (check_range['high'] > prev_fractals['high'].iloc[-1]).any()
 
 def get_htf_trend(symbol, htf):
@@ -194,9 +213,12 @@ def find_quality_zone(df, trend, current_atr):
     fractal_lows = df[df['is_fractal_low']]
     fractal_highs = df[df['is_fractal_high']]
     
-    def check_whale_vol(df, pos, ob_vol):
-        avg_vol = df['vol'].iloc[max(0, pos-20):pos].mean()
-        return ob_vol > (avg_vol * WHALE_VOL_MULTIPLIER) if avg_vol > 0 else False
+    # [FIXED] TÌM VOLUME CÁ MẬP Ở NẾN ĐẨY (SAU OB), KHÔNG TÌM Ở OB
+    def check_whale_vol(df, ob_idx):
+        avg_vol = df['vol'].iloc[max(0, ob_idx-20):ob_idx].mean()
+        post_ob_vols = df['vol'].iloc[ob_idx+1 : min(ob_idx+4, len(df))]
+        if post_ob_vols.empty or avg_vol == 0: return False
+        return post_ob_vols.max() > (avg_vol * WHALE_VOL_MULTIPLIER)
 
     if trend == "UP" and not fractal_lows.empty:
         idx = df.index.get_loc(fractal_lows.index[-1])
@@ -209,7 +231,7 @@ def find_quality_zone(df, trend, current_atr):
             pos = df.index.get_loc(ob.name)
             
             if check_fvg(df, pos, "UP") and check_bos_choch(df, pos, "UP"):
-                has_whale = check_whale_vol(df, pos, ob['vol'])
+                has_whale = check_whale_vol(df, pos)
                 sl = min(ob['low'], swing_low) - (current_atr * 0.3)
                 return (ob['high'] + ob['low']) / 2, sl, pos, True, has_whale
 
@@ -224,7 +246,7 @@ def find_quality_zone(df, trend, current_atr):
             pos = df.index.get_loc(ob.name)
             
             if check_fvg(df, pos, "DOWN") and check_bos_choch(df, pos, "DOWN"):
-                has_whale = check_whale_vol(df, pos, ob['vol'])
+                has_whale = check_whale_vol(df, pos)
                 sl = max(ob['high'], swing_high) + (current_atr * 0.3)
                 return (ob['high'] + ob['low']) / 2, sl, pos, True, has_whale
 
@@ -256,19 +278,18 @@ def is_trigger_candle(df, idx, signal_type):
     return False, ""
 
 # ==========================================
-# --- 5. ENGINE SMC PRO v5.8 ---
+# --- 5. ENGINE SMC PRO v6.0 ---
 # ==========================================
 def analyze_pair(symbol, tf):
     if ENABLE_KILLZONES:
         current_utc = datetime.utcnow().hour
-        if current_utc not in [7, 8, 9, 10, 12, 13, 14, 15]:
-            return False
+        if current_utc not in [7, 8, 9, 10, 12, 13, 14, 15]: return False
 
     htf = MTF_MAPPING.get(tf)
     htf_trend = get_htf_trend(symbol, htf)
     if htf_trend == "SIDEWAY": return False
 
-    bars = fetch_ohlcv_safe(symbol, tf, limit=1000) 
+    bars = fetch_ohlcv_safe(symbol, tf, limit=500) # Chuẩn hóa về 500 nến để tránh trượt API
     if not bars: return False
 
     df = pd.DataFrame(bars, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
@@ -314,9 +335,7 @@ def analyze_pair(symbol, tf):
         struct_tp = search_range['low'].min() 
 
     struct_rr = abs(struct_tp - entry) / risk if risk > 0 else 0
-
-    if struct_rr < 1.2:
-        return False
+    if struct_rr < 1.2: return False
 
     tp = struct_tp
     dyn_rr = round(struct_rr, 2)
@@ -325,11 +344,10 @@ def analyze_pair(symbol, tf):
     current_price = df['close'].iloc[-2]
     distance_atr = abs(current_price - entry) / atr
     bars_since_ob = len(df) - 2 - ob_idx
-    
-    # Lấy giới hạn nến theo khung thời gian (mặc định 22 nếu không có trong dict)
     limit_bars = MAX_BARS_LIMITS.get(tf, 22)
     
-    if distance_atr > 3.0 or bars_since_ob > limit_bars: return False
+    # [FIXED] Gỡ xung đột ATR. Chỉ hủy kèo nếu OB quá đát, hoặc giá đã bay đi quá 5 ATR mà chưa vòng về.
+    if bars_since_ob > limit_bars or distance_atr > 5.0: return False
 
     key = f"{symbol}_{tf}_{ob_idx}"
     if ENABLE_ORDER_ANTISPAM and state_manager.is_alerted(key): return False
@@ -341,26 +359,21 @@ def analyze_pair(symbol, tf):
     if signal_type == "BUY" and df.iloc[-2]['low'] <= (entry + ENTRY_TOLERANCE * atr): tapped = True
     elif signal_type == "SELL" and df.iloc[-2]['high'] >= (entry - ENTRY_TOLERANCE * atr): tapped = True
 
-    if tapped and has_trigger: execution = "CE Triggered ⚡"
-    elif tapped: execution = "Tapped Zone 👀"
-    else: execution = "Waiting Limit ⏳"
+    if tapped and has_trigger: execution = "CE Triggered ⚡ (CÓ THỂ VÀO LỆNH)"
+    elif tapped: execution = "Tapped Zone 👀 (Quan sát nến đảo chiều)"
+    else: execution = "Waiting Limit ⏳ (Chờ giá về vùng)"
 
     trigger_info = f"🕯️ Trigger: <b>{trigger_name}</b>\n" if has_trigger else ""
 
-    msg = (f"🚀 <b>SMC PRO v5.8 - {signal_type} {model_name}</b>\n"
+    msg = (f"🚀 <b>SMC Screener v6.0 - {signal_type} {model_name}</b>\n"
            f"Symbol: <b>{symbol}</b> ({tf}) | Age: {bars_since_ob}/{limit_bars} bars\n"
            f"-----------------\n"
            f"Score: <b>{setup_score}/7</b>\n"
-           f"Execution: <b>{execution}</b>\n"
+           f"Status: <b>{execution}</b>\n"
            f"{trigger_info}"
-           f"Entry: <code>{entry:.4f}</code>\n"
+           f"Entry (OB EQ): <code>{entry:.4f}</code>\n"
            f"Swing SL: <code>{sl:.4f}</code> 🛡️\n"
            f"Struct TP ({dyn_rr}R): <code>{tp:.4f}</code> 🎯\n"
-           f"-----------------\n"
-           f"🛡️ <b>Quản trị Lệnh:</b>\n"
-           f"1. Cài Limit tại Entry.\n"
-           f"2. Chạm 1R (<code>{tp1:.4f}</code>) -> Chốt 50% & Dời SL Hòa.\n"
-           f"3. Thả trôi tới Struct TP.\n"
            f"-----------------\n"
            f"🔍 Confluences:\n + " + "\n + ".join(factors))
 
@@ -375,14 +388,14 @@ def send_telegram(msg):
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                          json={"chat_id": cid, "text": msg, "parse_mode": "HTML"}, timeout=10)
         except Exception as e:
-            print(f"Lỗi gửi Telegram: {e}")
+            pass
 
 # ==========================================
 # --- 6. MAIN CHẠY ---
 # ==========================================
 if __name__ == "__main__":
     scan_time = datetime.now().strftime('%H:%M:%S')
-    print(f"🚀 SMC PRO v5.8 Started: {scan_time}")
+    print(f"🚀 SMC Screener v6.0 Started: {scan_time}")
     
     signals_found = 0
     for symbol in PAIRS:
@@ -392,9 +405,9 @@ if __name__ == "__main__":
             time.sleep(1.2)
             
     if signals_found == 0 and ENABLE_HEARTBEAT:
-        alive_msg = (f"🤖 <b>SMC Bot Status 4: ALIVE 🟢</b>\n"
+        alive_msg = (f"🤖 <b>SMC Bot Status: ALIVE 🟢</b>\n"
                      f"Time: <code>{scan_time}</code>\n"
-                     f"La bàn Khung Lớn đang không đồng thuận hoặc chưa có Setup >= 4 điểm.\n"
+                     f"Thị trường chưa có Setup SMC >= 4 điểm thỏa mãn điều kiện.\n"
                      
         send_telegram(alive_msg)
         print(">>> Bot Alive: Sent heartbeat.")
