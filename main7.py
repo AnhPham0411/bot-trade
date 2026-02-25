@@ -33,7 +33,7 @@ CHAT_IDS = [cid for cid in [user_chat_id, group_chat_id] if cid]
 exchange = ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
 
 # ==========================================
-# --- 2. STATE MANAGER (giữ nguyên) ---
+# --- 2. STATE MANAGER ---
 # ==========================================
 class GistStateManager:
     def __init__(self, filename='bot_state.json'):
@@ -47,10 +47,8 @@ class GistStateManager:
         if not self.github_token or not self.gist_id: return {}
         try:
             r = requests.get(f"https://api.github.com/gists/{self.gist_id}", headers=self.headers, timeout=10)
-            if r.status_code == 200:
-                files = r.json().get('files', {})
-                if self.filename in files:
-                    return json.loads(files[self.filename]['content'])
+            if r.status_code == 200 and self.filename in r.json().get('files', {}):
+                return json.loads(r.json()['files'][self.filename]['content'])
         except: pass
         return {}
 
@@ -63,8 +61,7 @@ class GistStateManager:
 
     def is_alerted(self, key, cooldown=4000):
         now = time.time()
-        if key in self.state and (now - self.state[key]) < cooldown:
-            return True
+        if key in self.state and (now - self.state[key]) < cooldown: return True
         self.state[key] = now
         self.save()
         return False
@@ -89,6 +86,9 @@ def retry_api(retries=3, delay=2):
 def fetch_ohlcv_safe(symbol, tf, limit=500):
     return exchange.fetch_ohlcv(symbol, tf, limit=limit)
 
+def calculate_ema(series, length):
+    return series.ewm(span=length, adjust=False).mean()
+
 def calculate_atr(df, length=14):
     hl = df['high'] - df['low']
     hc = np.abs(df['high'] - df['close'].shift())
@@ -98,9 +98,11 @@ def calculate_atr(df, length=14):
 
 def calculate_rsi(series, length=14):
     delta = series.diff()
-    gain = delta.where(delta > 0, 0).rolling(length).mean()
-    loss = -delta.where(delta < 0, 0).rolling(length).mean()
-    rs = gain / loss.replace(0, np.nan)
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/length, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/length, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
     return 100 - (100 / (1 + rs.fillna(0)))
 
 def identify_fractals(df):
@@ -112,13 +114,23 @@ def identify_fractals(df):
     return df
 
 # ==========================================
-# --- 4. SMC CORE - ĐÃ FIX HOÀN TOÀN ---
+# --- 4. SMC CORE ---
 # ==========================================
-def has_fvg(df, idx):
-    if idx + 2 >= len(df): return False, None
-    if df['low'].iloc[idx+2] > df['high'].iloc[idx]: return True, "bullish"
-    if df['high'].iloc[idx+2] < df['low'].iloc[idx]: return True, "bearish"
+def has_fvg(df, ob_idx):
+    end_idx = min(ob_idx + 4, len(df) - 1)
+    for i in range(ob_idx + 1, end_idx):
+        if df['low'].iloc[i + 1] > df['high'].iloc[i - 1]: return True, "bullish"
+        if df['high'].iloc[i + 1] < df['low'].iloc[i - 1]: return True, "bearish"
     return False, None
+
+def is_mitigated(df, ob_idx, trend, entry):
+    if ob_idx + 1 >= len(df) - 3: return False   
+    recent = df.iloc[ob_idx + 1 : -3]
+    if recent.empty: return False
+    buffer = 0.1 * df['atr'].iloc[ob_idx] if 'atr' in df.columns else 0
+    if trend == "UP":
+        return (recent['low'] <= entry + buffer).any()
+    return (recent['high'] >= entry - buffer).any()
 
 def is_strong_displacement(df, idx, direction):
     if idx >= len(df): return False
@@ -129,45 +141,43 @@ def is_strong_displacement(df, idx, direction):
 
 def find_quality_zone(df, trend, atr):
     df = df.reset_index(drop=True)
-    for i in range(25, len(df)-8):
+    for i in range(len(df) - 10, 25, -1):
         if trend == "UP":
-            if df['close'].iloc[i] < df['open'].iloc[i]:  # last bearish candle
-                if is_strong_displacement(df, i+1, "UP"):
+            if df['close'].iloc[i] < df['open'].iloc[i]:
+                if is_strong_displacement(df, i + 1, "UP"):
                     fvg_ok, fvg_dir = has_fvg(df, i)
                     if fvg_ok and fvg_dir == "bullish":
                         entry = (df['high'].iloc[i] + df['low'].iloc[i]) / 2
-                        sl = df['low'].iloc[i] - atr * SL_ATR_MULTIPLIER
+                        swing_low = df['low'].iloc[max(0, i-40):i+1].min()
+                        sl = min(df['low'].iloc[i], swing_low) - atr * SL_ATR_MULTIPLIER
+                        if is_mitigated(df, i, trend, entry): continue
                         whale = df['vol'].iloc[i+1:i+5].max() > df['vol'].iloc[max(0,i-25):i].mean() * WHALE_VOL_MULTIPLIER
                         sweep = df['low'].iloc[i-6:i+1].min() < df['low'].iloc[i-15:i-6].min() if i > 15 else False
                         return entry, sl, i, True, whale, sweep
-        else:  # DOWN
+        else:
             if df['close'].iloc[i] > df['open'].iloc[i]:
-                if is_strong_displacement(df, i+1, "DOWN"):
+                if is_strong_displacement(df, i + 1, "DOWN"):
                     fvg_ok, fvg_dir = has_fvg(df, i)
                     if fvg_ok and fvg_dir == "bearish":
                         entry = (df['high'].iloc[i] + df['low'].iloc[i]) / 2
-                        sl = df['high'].iloc[i] + atr * SL_ATR_MULTIPLIER
+                        swing_high = df['high'].iloc[max(0, i-40):i+1].max()
+                        sl = max(df['high'].iloc[i], swing_high) + atr * SL_ATR_MULTIPLIER
+                        if is_mitigated(df, i, trend, entry): continue
                         whale = df['vol'].iloc[i+1:i+5].max() > df['vol'].iloc[max(0,i-25):i].mean() * WHALE_VOL_MULTIPLIER
                         sweep = df['high'].iloc[i-6:i+1].max() > df['high'].iloc[i-15:i-6].max() if i > 15 else False
                         return entry, sl, i, True, whale, sweep
     return 0, 0, 0, False, False, False
-
-def is_mitigated(df, ob_idx, trend):
-    recent = df.iloc[ob_idx+1:]
-    if trend == "UP":
-        return (recent['low'] < df['low'].iloc[ob_idx]).any()
-    return (recent['high'] > df['high'].iloc[ob_idx]).any()
 
 def get_htf_trend(symbol, htf):
     bars = fetch_ohlcv_safe(symbol, htf, limit=300)
     if not bars: return "SIDEWAY"
     df = pd.DataFrame(bars, columns=['ts','open','high','low','close','vol'])
     df = identify_fractals(df)
-    recent_high = df['high'].iloc[-25:].max()
-    recent_low = df['low'].iloc[-25:].min()
-    price = df['close'].iloc[-1]
-    if price > recent_high * 0.997: return "UP"
-    if price < recent_low * 1.003: return "DOWN"
+    ema200 = calculate_ema(df['close'], 200).iloc[-1]
+    atr = calculate_atr(df).iloc[-1]
+    close = df['close'].iloc[-1]
+    if close > ema200 - atr * 1.2: return "UP"
+    if close < ema200 + atr * 1.2: return "DOWN"
     return "SIDEWAY"
 
 def get_swing_range(df):
@@ -221,31 +231,30 @@ def analyze_pair(symbol, tf):
     atr = df['atr'].iloc[-2]
     entry, sl, ob_idx, has_fvg, has_whale, has_sweep = find_quality_zone(df, htf_trend, atr)
     if not has_fvg or entry == 0: return False
-    if is_mitigated(df, ob_idx, htf_trend): return False
+
+    # [FIX 1] Hủy kèo ngay lập tức nếu giá đã đâm thủng SL
+    if (htf_trend == "UP" and df['low'].iloc[-2] <= sl) or (htf_trend == "DOWN" and df['high'].iloc[-2] >= sl):
+        return False
 
     risk = abs(entry - sl)
     score = 4
     factors = [f"HTF {htf_trend}", "Valid OB + FVG + Displacement"]
 
-    if has_whale:
-        score += 1
-        factors.append("Whale Volume 🐳")
-    if has_sweep:
-        score += 1
-        factors.append("Liquidity Sweep 🦈")
+    if has_whale: 
+        score += 1; factors.append("Whale Volume 🐳")
+    if has_sweep: 
+        score += 1; factors.append("Liquidity Sweep 🦈")
     if is_premium_discount(entry, htf_trend, *get_swing_range(df)):
-        score += 1
-        factors.append("Premium/Discount 💎")
+        score += 1; factors.append("Premium/Discount 💎")
 
     rsi = df['rsi'].iloc[-2]
     if (htf_trend == "UP" and rsi < 48) or (htf_trend == "DOWN" and rsi > 52):
-        score += 1
-        factors.append(f"RSI {rsi:.1f}")
+        score += 1; factors.append(f"RSI {rsi:.1f}")
 
     if score < MIN_SCORE: return False
 
-    # TP
     search = df.iloc[ob_idx+5:-1]
+    if search.empty: return False
     tp = search['high'].max() if htf_trend == "UP" else search['low'].min()
     rr = abs(tp - entry) / risk if risk > 0 else 0
     if rr < 1.5: return False
@@ -253,9 +262,7 @@ def analyze_pair(symbol, tf):
     bars_since = len(df) - 2 - ob_idx
     if bars_since > MAX_BARS_LIMITS[tf] or abs(df['close'].iloc[-2] - entry) / atr > 6: return False
 
-    key = f"{symbol}_{tf}_{ob_idx}"
-    if ENABLE_ORDER_ANTISPAM and state_manager.is_alerted(key): return False
-
+    # [FIX 2] Đưa Trạng Thái (exec_status) lên trước để gộp vào Key chống Spam
     sig = "BUY" if htf_trend == "UP" else "SELL"
     has_trig, trig_name = is_trigger_candle(df, len(df)-2, sig)
 
@@ -263,15 +270,19 @@ def analyze_pair(symbol, tf):
     tapped = (sig == "BUY" and df.iloc[-2]['low'] <= entry + tol) or (sig == "SELL" and df.iloc[-2]['high'] >= entry - tol)
 
     exec_status = "CE Triggered ⚡" if tapped and has_trig else "Tapped 👀" if tapped else "Waiting ⏳"
+    
+    # Key chống spam giờ sẽ phân biệt giữa Waiting và Tapped/Triggered
+    key = f"{symbol}_{tf}_{ob_idx}_{exec_status}"
+    if ENABLE_ORDER_ANTISPAM and state_manager.is_alerted(key): return False
 
     model = "🦄 UNICORN" if score >= 7 else "🔥 STRONG"
 
-    msg = f"""🚀 <b>SMC v6.1 REAL EDGE</b> - {sig} {model}
+    msg = f"""🚀 <b>SMC v6.5 FINAL</b> - {sig} {model}
 {symbol} ({tf}) | Age {bars_since}/{MAX_BARS_LIMITS[tf]}
 Score: <b>{score}/8</b> | {exec_status}
 
 Entry: <code>{entry:.4f}</code>
-SL: <code>{sl:.4f}</code> ({SL_ATR_MULTIPLIER}ATR)
+SL: <code>{sl:.4f}</code> (swing protected)
 TP: <code>{tp:.4f}</code> ({rr:.2f}R)
 
 Confluences:
@@ -285,7 +296,7 @@ Confluences:
 # --- MAIN ---
 # ==========================================
 if __name__ == "__main__":
-    print(f"SMC Screener v6.1 REAL EDGE Started {datetime.now().strftime('%H:%M:%S')}")
+    print(f"SMC Screener v6.5 FINAL Started {datetime.now().strftime('%H:%M:%S')}")
     signals = 0
     for sym in PAIRS:
         for tf in MTF_MAPPING:
@@ -294,5 +305,5 @@ if __name__ == "__main__":
             time.sleep(1.3)
 
     if signals == 0 and ENABLE_HEARTBEAT:
-        send_telegram(f"🤖 SMC v6.1 ALIVE 🟢\nNo high-quality setup at {datetime.now().strftime('%H:%M:%S')}")
+        send_telegram(f"🤖 SMC v6.5 ALIVE 🟢\nNo high-quality setup at {datetime.now().strftime('%H:%M:%S')}")
     print("Scan xong.")
