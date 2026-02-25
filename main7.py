@@ -13,13 +13,20 @@ from functools import wraps
 # ==========================================
 PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
 
-# ÉP LA BÀN 4H: Cả 15m và 1h đều phải thuận xu hướng của 4H
-MTF_MAPPING = {'15m': '4h', '1h': '4h'}
+# ÉP LA BÀN ĐA KHUNG THỜI GIAN (MTF):
+# 15m đánh theo xu hướng 1h | 1h đánh theo xu hướng 4h | 4h đánh theo xu hướng 1d
+MTF_MAPPING = {'15m': '1h', '1h': '4h', '4h': '1d'}
 
 SL_ATR_MULTIPLIER = 1.5
 ENTRY_TOLERANCE = 0.5
 WHALE_VOL_MULTIPLIER = 1.5
-MAX_BARS_SINCE_OB = 22          
+
+# GIỚI HẠN TUỔI THỌ ORDER BLOCK THEO TỪNG KHUNG GIỜ
+MAX_BARS_LIMITS = {
+    '15m': 30,  # Chờ tối đa 30 nến (7.5 tiếng)
+    '1h': 72,   # Chờ tối đa 72 nến (3 ngày)
+    '4h': 50    # Chờ tối đa 50 nến (~8.3 ngày)
+}
 
 # --- BỘ LỌC DYNAMIC TP & SCORING ---
 MIN_SCORE = 4         # Chỉ bắn lệnh từ 4 điểm trở lên
@@ -191,10 +198,9 @@ def find_quality_zone(df, trend, current_atr):
         avg_vol = df['vol'].iloc[max(0, pos-20):pos].mean()
         return ob_vol > (avg_vol * WHALE_VOL_MULTIPLIER) if avg_vol > 0 else False
 
-    # NÂNG CẤP 1: TÌM STOPLOSS THEO SWING STRUCTURE THAY VÌ OB
     if trend == "UP" and not fractal_lows.empty:
         idx = df.index.get_loc(fractal_lows.index[-1])
-        swing_low = df['low'].iloc[idx] # Lấy đáy thấp nhất của con sóng
+        swing_low = df['low'].iloc[idx] 
         
         sub = df.iloc[max(0, idx-10):idx+2] 
         red_candles = sub[sub['close'] < sub['open']]
@@ -204,13 +210,12 @@ def find_quality_zone(df, trend, current_atr):
             
             if check_fvg(df, pos, "UP") and check_bos_choch(df, pos, "UP"):
                 has_whale = check_whale_vol(df, pos, ob['vol'])
-                # SL đặt dưới Swing Low, né quét râu thủng OB
                 sl = min(ob['low'], swing_low) - (current_atr * 0.3)
                 return (ob['high'] + ob['low']) / 2, sl, pos, True, has_whale
 
     elif trend == "DOWN" and not fractal_highs.empty:
         idx = df.index.get_loc(fractal_highs.index[-1])
-        swing_high = df['high'].iloc[idx] # Lấy đỉnh cao nhất của con sóng
+        swing_high = df['high'].iloc[idx] 
         
         sub = df.iloc[max(0, idx-10):idx+2]
         green_candles = sub[sub['close'] > sub['open']]
@@ -220,14 +225,13 @@ def find_quality_zone(df, trend, current_atr):
             
             if check_fvg(df, pos, "DOWN") and check_bos_choch(df, pos, "DOWN"):
                 has_whale = check_whale_vol(df, pos, ob['vol'])
-                # SL đặt trên Swing High
                 sl = max(ob['high'], swing_high) + (current_atr * 0.3)
                 return (ob['high'] + ob['low']) / 2, sl, pos, True, has_whale
 
     return 0, 0, 0, False, False
 
 def get_swing_range(df):
-    lookback = 300  # Đã mở rộng lên 300 nến để góc nhìn tổng quan hơn
+    lookback = 300  
     return df['high'].iloc[-lookback:].max(), df['low'].iloc[-lookback:].min()
 
 def is_premium_discount(entry, trend, swing_high, swing_low):
@@ -255,10 +259,8 @@ def is_trigger_candle(df, idx, signal_type):
 # --- 5. ENGINE SMC PRO v5.8 ---
 # ==========================================
 def analyze_pair(symbol, tf):
-    # NÂNG CẤP 3: LỌC NHIỄU BẰNG KILLZONES (PHIÊN GIAO DỊCH)
     if ENABLE_KILLZONES:
         current_utc = datetime.utcnow().hour
-        # UTC hours cho London (14h-17h VN) và NY (19h-22h VN)
         if current_utc not in [7, 8, 9, 10, 12, 13, 14, 15]:
             return False
 
@@ -266,7 +268,7 @@ def analyze_pair(symbol, tf):
     htf_trend = get_htf_trend(symbol, htf)
     if htf_trend == "SIDEWAY": return False
 
-    bars = fetch_ohlcv_safe(symbol, tf, limit=1000) # Đã nâng cấp lên 1000 nến
+    bars = fetch_ohlcv_safe(symbol, tf, limit=1000) 
     if not bars: return False
 
     df = pd.DataFrame(bars, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
@@ -280,7 +282,7 @@ def analyze_pair(symbol, tf):
 
     risk = abs(entry - sl)
     setup_score = 3  
-    factors = [f"HTF Trend 4H: {htf_trend} ✅", "Valid BOS 🏗️", "Displacement (FVG) ⚡"]
+    factors = [f"HTF Trend {htf}: {htf_trend} ✅", "Valid BOS 🏗️", "Displacement (FVG) ⚡"]
 
     if has_whale_vol:
         setup_score += 1
@@ -303,30 +305,31 @@ def analyze_pair(symbol, tf):
     if setup_score < MIN_SCORE: return False
     model_name = "🦄 UNICORN SETUP" if setup_score >= 6 else "🔥 STRONG SETUP"
 
-    # NÂNG CẤP 2: TP THEO THANH KHOẢN CẤU TRÚC (STRUCTURAL LIQUIDITY)
-    search_range = df.iloc[ob_idx + 1 : -1] # Khoảng từ OB đến nến hiện tại
+    search_range = df.iloc[ob_idx + 1 : -1] 
     if search_range.empty: return False
     
     if signal_type == "BUY":
-        struct_tp = search_range['high'].max() # Đỉnh cao nhất hút thanh khoản
+        struct_tp = search_range['high'].max() 
     else:
-        struct_tp = search_range['low'].min() # Đáy thấp nhất hút thanh khoản
+        struct_tp = search_range['low'].min() 
 
-    # Tính R:R thực tế dựa trên điểm TP cấu trúc
     struct_rr = abs(struct_tp - entry) / risk if risk > 0 else 0
 
-    # Lọc nhiễu: TP cấu trúc quá hẹp, RR không đạt 1.2 -> Bỏ kèo
     if struct_rr < 1.2:
         return False
 
     tp = struct_tp
     dyn_rr = round(struct_rr, 2)
-    tp1 = entry + risk if signal_type == "BUY" else entry - risk # Mốc 1R
+    tp1 = entry + risk if signal_type == "BUY" else entry - risk 
 
     current_price = df['close'].iloc[-2]
     distance_atr = abs(current_price - entry) / atr
     bars_since_ob = len(df) - 2 - ob_idx
-    if distance_atr > 3.0 or bars_since_ob > MAX_BARS_SINCE_OB: return False
+    
+    # Lấy giới hạn nến theo khung thời gian (mặc định 22 nếu không có trong dict)
+    limit_bars = MAX_BARS_LIMITS.get(tf, 22)
+    
+    if distance_atr > 3.0 or bars_since_ob > limit_bars: return False
 
     key = f"{symbol}_{tf}_{ob_idx}"
     if ENABLE_ORDER_ANTISPAM and state_manager.is_alerted(key): return False
@@ -345,7 +348,7 @@ def analyze_pair(symbol, tf):
     trigger_info = f"🕯️ Trigger: <b>{trigger_name}</b>\n" if has_trigger else ""
 
     msg = (f"🚀 <b>SMC PRO v5.8 - {signal_type} {model_name}</b>\n"
-           f"Symbol: <b>{symbol}</b> ({tf}) | Age: {bars_since_ob} bars\n"
+           f"Symbol: <b>{symbol}</b> ({tf}) | Age: {bars_since_ob}/{limit_bars} bars\n"
            f"-----------------\n"
            f"Score: <b>{setup_score}/7</b>\n"
            f"Execution: <b>{execution}</b>\n"
@@ -391,8 +394,8 @@ if __name__ == "__main__":
     if signals_found == 0 and ENABLE_HEARTBEAT:
         alive_msg = (f"🤖 <b>SMC Bot Status 4: ALIVE 🟢</b>\n"
                      f"Time: <code>{scan_time}</code>\n"
-                     f"La bàn 4H đang không đồng thuận hoặc chưa có Setup >= 4 điểm.\n"
-                     f"<i>P/s: Chờ Cá mập dọn đường nhé! ☕🦈</i>")
+                     f"La bàn Khung Lớn đang không đồng thuận hoặc chưa có Setup >= 4 điểm.\n"
+                     
         send_telegram(alive_msg)
         print(">>> Bot Alive: Sent heartbeat.")
         
