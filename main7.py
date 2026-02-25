@@ -277,6 +277,9 @@ def analyze_pair(symbol, tf):
 
     model = "🦄 UNICORN" if score >= 7 else "🔥 STRONG"
 
+    # Xử lý chuỗi trước khi đưa vào f-string để tương thích Python 3.10
+    factors_str = '\n• '.join(factors)
+
     msg = f"""🚀 <b>SMC v6.5 FINAL</b> - {sig} {model}
 {symbol} ({tf}) | Age {bars_since}/{MAX_BARS_LIMITS[tf]}
 Score: <b>{score}/8</b> | {exec_status}
@@ -286,7 +289,7 @@ SL: <code>{sl:.4f}</code> (swing protected)
 TP: <code>{tp:.4f}</code> ({rr:.2f}R)
 
 Confluences:
-• {'\n• '.join(factors)}"""
+• {factors_str}"""
 
     send_telegram(msg)
     print(f">>> {symbol} {tf} | {exec_status} | Score {score} | {rr:.2f}R")
