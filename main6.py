@@ -9,70 +9,57 @@ from datetime import datetime, timezone, timedelta
 from functools import wraps
 
 # ==========================================
-# --- 1. CẤU HÌNH (GitHub Actions) ---
+# --- 1. CẤU HÌNH HỆ THỐNG ---
 # ==========================================
-ENABLE_ANTI_SPAM = False   # Đổi thành False nếu bạn muốn TẮT chống spam (để test hoặc ép bot báo lại lệnh cũ)
-ENABLE_ALERTS = True      # Bật/tắt toàn bộ tin nhắn Telegram
-ENABLE_HEARTBEAT = True  # Bật/tắt tin nhắn "ALIVE" mỗi lần quét
-
 PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
-MTF_MAPPING = {'1h': '4h'}
+MTF_MAPPING = {'15m': '1h', '1h': '4h', '4h': '1d'}
 
-SL_ATR_MULTIPLIER = 1.8
-MIN_VOLATILITY = 0.003
+SL_ATR_MULTIPLIER = 1.5  # Khoảng đệm né râu nến
+ENTRY_TOLERANCE = 0.5    # Khoảng cách báo Tapped
+WHALE_VOL_MULTIPLIER = 1.8
+MIN_SCORE = 5
 
-MIN_SCORE = 4
-RR_TIER_2 = 1.67
-RR_TIER_3 = 2.4
+MAX_BARS_LIMITS = {'15m': 35, '1h': 80, '4h': 55}
+
+ENABLE_ORDER_ANTISPAM = True
+ENABLE_HEARTBEAT = True
+ENABLE_KILLZONES = False
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-CHAT_IDS = [os.getenv('TELEGRAM_CHAT_ID')]
+CHAT_IDS = [os.getenv('TELEGRAM_CHAT_ID'), "-5213535598"]
 
-exchange = ccxt.mexc({
-    'enableRateLimit': True,
-    'options': {'defaultType': 'swap'}
-})
+exchange = ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
 
 # ==========================================
-# --- 2. STATE MANAGER (Gist) ---
+# --- 2. STATE MANAGER (Chống Spam qua Gist) ---
 # ==========================================
 class GistStateManager:
     def __init__(self, filename='bot_state.json'):
         self.filename = filename
         self.github_token = os.getenv('GH_GIST_TOKEN')
         self.gist_id = os.getenv('GIST_ID')
-        self.headers = {
-            "Authorization": f"token {self.github_token}",
-            "Accept": "application/vnd.github.v3+json"
-        } if self.github_token and self.gist_id else {}
+        self.headers = {"Authorization": f"token {self.github_token}", "Accept": "application/vnd.github.v3+json"} if self.github_token else {}
         self.state = self.load()
 
     def load(self):
-        if not self.headers: return {}
+        if not self.github_token or not self.gist_id: return {}
         try:
-            url = f"https://api.github.com/gists/{self.gist_id}"
-            r = requests.get(url, headers=self.headers, timeout=10)
-            if r.status_code == 200:
-                files = r.json().get('files', {})
-                if self.filename in files:
-                    return json.loads(files[self.filename]['content'])
-        except Exception as e: 
-            print(f"⚠️ Lỗi đọc Gist: {e}")
+            r = requests.get(f"https://api.github.com/gists/{self.gist_id}", headers=self.headers, timeout=10)
+            if r.status_code == 200 and self.filename in r.json().get('files', {}):
+                return json.loads(r.json()['files'][self.filename]['content'])
+        except: pass
         return {}
 
     def save(self):
-        if not self.headers: return
+        if not self.github_token or not self.gist_id: return
         try:
-            url = f"https://api.github.com/gists/{self.gist_id}"
             payload = {"files": {self.filename: {"content": json.dumps(self.state, indent=2)}}}
-            requests.patch(url, headers=self.headers, json=payload, timeout=10)
-        except Exception as e:
-            print(f"⚠️ Lỗi lưu Gist: {e}")
+            requests.patch(f"https://api.github.com/gists/{self.gist_id}", headers=self.headers, json=payload, timeout=10)
+        except: pass
 
-    def is_alerted(self, key, cooldown=3500):
+    def is_alerted(self, key, cooldown=4000):
         now = time.time()
-        if key in self.state and (now - self.state[key]) < cooldown:
-            return True
+        if key in self.state and (now - self.state[key]) < cooldown: return True
         self.state[key] = now
         self.save()
         return False
@@ -80,182 +67,257 @@ class GistStateManager:
 state_manager = GistStateManager()
 
 # ==========================================
-# --- 3. TIỆN ÍCH ---
+# --- 3. TIỆN ÍCH & CHỈ BÁO ---
 # ==========================================
 def retry_api(retries=3, delay=2):
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
             for _ in range(retries):
-                try:
-                    return func(*args, **kwargs)
-                except Exception as e:
-                    print(f"⚠️ API Error: {e}")
-                    time.sleep(delay)
+                try: return func(*args, **kwargs)
+                except: time.sleep(delay)
             return None
         return wrapper
     return decorator
 
 @retry_api()
-def fetch_ohlcv_safe(symbol, tf, limit=100):
+def fetch_ohlcv_safe(symbol, tf, limit=500):
     return exchange.fetch_ohlcv(symbol, tf, limit=limit)
 
 def calculate_atr(df, length=14):
     hl = df['high'] - df['low']
     hc = np.abs(df['high'] - df['close'].shift())
     lc = np.abs(df['low'] - df['close'].shift())
-    return pd.concat([hl, hc, lc], axis=1).max(axis=1).rolling(window=length).mean()
+    tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
+    return tr.rolling(length).mean()
+
+def calculate_rsi(series, length=14):
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0).ewm(alpha=1/length, adjust=False).mean()
+    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/length, adjust=False).mean()
+    rs = gain / loss.replace(0, np.nan)
+    return 100 - (100 / (1 + rs.fillna(0)))
 
 def get_htf_trend(symbol, htf):
-    bars = fetch_ohlcv_safe(symbol, htf, limit=1000)
+    bars = fetch_ohlcv_safe(symbol, htf, limit=300)
     if not bars: return "SIDEWAY"
-    df = pd.DataFrame(bars, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-    ema_200 = df['close'].ewm(span=200, adjust=False).mean().iloc[-2]
-    atr = calculate_atr(df).iloc[-2]
-    close_price = df['close'].iloc[-2]
-    if abs(close_price - ema_200) < atr * 1.2: return "SIDEWAY"
-    return "UP" if close_price > ema_200 else "DOWN"
+    df = pd.DataFrame(bars, columns=['ts','open','high','low','close','vol'])
+    ema200 = df['close'].ewm(span=200, adjust=False).mean().iloc[-1]
+    close = df['close'].iloc[-1]
+    
+    if close > ema200: return "UP"
+    elif close < ema200: return "DOWN"
+    return "SIDEWAY"
 
 # ==========================================
-# --- 4. MODULE LOGIC ---
+# --- 4. SMC CORE TỐI ƯU HOÁ ---
 # ==========================================
-def analyze_smc(closed_df, lookback=20): 
-    recent = closed_df.iloc[-lookback:]
-    roll_high = recent['high'].rolling(5, center=True).max().dropna()
-    roll_low  = recent['low'].rolling(5, center=True).min().dropna()
+def has_fvg(df, ob_idx):
+    end_idx = min(ob_idx + 4, len(df) - 1)
+    for i in range(ob_idx + 1, end_idx):
+        if df['low'].iloc[i + 1] > df['high'].iloc[i - 1]: return True, "bullish"
+        if df['high'].iloc[i + 1] < df['low'].iloc[i - 1]: return True, "bearish"
+    return False, None
+
+def is_mitigated(df, ob_idx, trend, entry):
+    if ob_idx + 1 >= len(df) - 3: return False   
+    recent = df.iloc[ob_idx + 1 : -3]
+    if recent.empty: return False
     
-    swing_high = roll_high.iloc[-1] if not roll_high.empty else recent['high'].max()
-    swing_low  = roll_low.iloc[-1]  if not roll_low.empty  else recent['low'].min()
-    current = closed_df.iloc[-1]
+    buffer = 0.1 * df['atr'].iloc[ob_idx] if 'atr' in df.columns else 0
+    if trend == "UP":
+        return (recent['low'] <= entry + buffer).any()
+    return (recent['high'] >= entry - buffer).any()
+
+def is_strong_displacement(df, idx, direction):
+    if idx >= len(df): return False
+    c = df.iloc[idx]
+    body = abs(c['close'] - c['open'])
+    if body < (c['high'] - c['low']) * 0.65: return False
+    return (direction == "UP" and c['close'] > c['open']) or (direction == "DOWN" and c['close'] < c['open'])
+
+# [FIX] Cho phép Displacement xuất hiện trong 3 nến sau OB
+def has_strong_displacement_soon(df, ob_idx, direction):
+    end_idx = min(ob_idx + 4, len(df))
+    for j in range(ob_idx + 1, end_idx):
+        if is_strong_displacement(df, j, direction):
+            return True
+    return False
+
+def find_quality_zone(df, trend, atr):
+    df = df.reset_index(drop=True)
+    for i in range(len(df) - 10, 25, -1):
+        if trend == "UP":
+            if df['close'].iloc[i] < df['open'].iloc[i]: 
+                if has_strong_displacement_soon(df, i, "UP"): 
+                    fvg_ok, fvg_dir = has_fvg(df, i)
+                    if fvg_ok and fvg_dir == "bullish":
+                        entry = (df['high'].iloc[i] + df['low'].iloc[i]) / 2
+                        swing_low = df['low'].iloc[max(0, i-40):i+1].min()
+                        sl = min(df['low'].iloc[i], swing_low) - atr * SL_ATR_MULTIPLIER
+                        if is_mitigated(df, i, trend, entry): continue
+                        
+                        whale = df['vol'].iloc[i+1:i+5].max() > df['vol'].iloc[max(0,i-25):i].mean() * WHALE_VOL_MULTIPLIER
+                        sweep = df['low'].iloc[i-6:i+1].min() < df['low'].iloc[i-15:i-6].min() if i > 15 else False
+                        return entry, sl, i, True, whale, sweep
+        else:
+            if df['close'].iloc[i] > df['open'].iloc[i]: 
+                if has_strong_displacement_soon(df, i, "DOWN"): 
+                    fvg_ok, fvg_dir = has_fvg(df, i)
+                    if fvg_ok and fvg_dir == "bearish":
+                        entry = (df['high'].iloc[i] + df['low'].iloc[i]) / 2
+                        swing_high = df['high'].iloc[max(0, i-40):i+1].max()
+                        sl = max(df['high'].iloc[i], swing_high) + atr * SL_ATR_MULTIPLIER
+                        if is_mitigated(df, i, trend, entry): continue
+                        
+                        whale = df['vol'].iloc[i+1:i+5].max() > df['vol'].iloc[max(0,i-25):i].mean() * WHALE_VOL_MULTIPLIER
+                        sweep = df['high'].iloc[i-6:i+1].max() > df['high'].iloc[i-15:i-6].max() if i > 15 else False
+                        return entry, sl, i, True, whale, sweep
+    return 0, 0, 0, False, False, False
+
+def get_swing_range(df):
+    return df['high'].iloc[-250:].max(), df['low'].iloc[-250:].min()
+
+def is_premium_discount(entry, trend, sh, sl):
+    mid = (sh + sl) / 2
+    return (trend == "UP" and entry < mid) or (trend == "DOWN" and entry > mid)
+
+def check_ce_trigger(df, idx, sig):
+    if idx < 1: return False, ""
     
-    trend = "BULLISH" if current['close'] > swing_high else "BEARISH" if current['close'] < swing_low else "NEUTRAL"
-    return {"trend": trend, "swing_high": swing_high, "swing_low": swing_low}
-
-def analyze_ict(closed_df):
-    c1 = closed_df.iloc[-3]  
-    c2 = closed_df.iloc[-2]  
-    c3 = closed_df.iloc[-1]  
+    c_op, c_cl = float(df['open'].iloc[idx]), float(df['close'].iloc[idx])
+    c_hi, c_lo = float(df['high'].iloc[idx]), float(df['low'].iloc[idx])
+    p_op, p_cl = float(df['open'].iloc[idx-1]), float(df['close'].iloc[idx-1])
     
-    candle_time = datetime.fromtimestamp(c3['ts'] / 1000, tz=timezone.utc)
-    est_hour = (candle_time - timedelta(hours=5)).hour
-    is_killzone = (9 <= est_hour <= 11) or (2 <= est_hour <= 5)
+    c_vol = float(df['vol'].iloc[idx])
+    avg_vol = float(df['vol'].iloc[max(0, idx-20):idx].mean())
+    vol_spike = c_vol > avg_vol * 1.5
+
+    body = abs(c_cl - c_op)
+    upper = c_hi - max(c_cl, c_op)
+    lower = min(c_cl, c_op) - c_lo
     
-    is_bullish_fvg = c3['low'] > c1['high'] and c2['close'] > c2['open']
-    is_bearish_fvg = c3['high'] < c1['low']  and c2['close'] < c2['open']
-    fvg_status = "BULLISH" if is_bullish_fvg else "BEARISH" if is_bearish_fvg else "NONE"
-    return {"is_killzone": is_killzone, "fvg": fvg_status}
-
-def analyze_volume_pa(closed_df):
-    current = closed_df.iloc[-1]
-    prev = closed_df.iloc[-2]
-    avg_vol = closed_df['vol'].iloc[-20:].mean()
-    is_volume_spike = current['vol'] > avg_vol * 2
-    
-    is_bull_eng = (prev['close'] <= prev['open'] and current['close'] > current['open'] and
-                   current['close'] >= prev['open'] and current['open'] <= prev['close'])
-    
-    is_bear_eng = (prev['close'] >= prev['open'] and current['close'] < current['open'] and
-                   current['close'] <= prev['open'] and current['open'] >= prev['close'])
-                   
-    pattern = "BULLISH_ENGULFING" if is_bull_eng else "BEARISH_ENGULFING" if is_bear_eng else "NONE"
-    return {"is_volume_spike": is_volume_spike, "pattern": pattern}
-
-# ==========================================
-# --- 5. ENGINE ---
-# ==========================================
-def analyze_pair(symbol, tf):
-    htf = MTF_MAPPING[tf]
-    htf_trend = get_htf_trend(symbol, htf)
-    if htf_trend == "SIDEWAY": return False
-
-    bars = fetch_ohlcv_safe(symbol, tf, limit=100)
-    if not bars: return False
-
-    df = pd.DataFrame(bars, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-    df['atr'] = calculate_atr(df)
-
-    closed_df = df.iloc[:-1]
-    current_atr = closed_df['atr'].iloc[-1]
-    entry = closed_df['close'].iloc[-1]
-
-    if current_atr < entry * MIN_VOLATILITY: return False
-
-    smc = analyze_smc(closed_df)
-    ict = analyze_ict(closed_df)
-    vol_pa = analyze_volume_pa(closed_df)
-
-    signal_type = None
-    if htf_trend == "UP" and smc['trend'] == "BULLISH": signal_type = "BUY"
-    elif htf_trend == "DOWN" and smc['trend'] == "BEARISH": signal_type = "SELL"
-    if not signal_type: return False
-
-    score = 3
-    factors = [f"HTF 4H: {htf_trend} ✅", "BOS H1 🏗️"]
-    if ict['is_killzone']: score += 1; factors.append("Killzone ⏱️")
-    if (signal_type == "BUY" and ict['fvg'] == "BULLISH") or (signal_type == "SELL" and ict['fvg'] == "BEARISH"):
-        score += 1; factors.append("FVG ⚡")
-    if vol_pa['is_volume_spike']: score += 1; factors.append("Volume Spike 🐳")
-    if (signal_type == "BUY" and vol_pa['pattern'] == "BULLISH_ENGULFING") or \
-       (signal_type == "SELL" and vol_pa['pattern'] == "BEARISH_ENGULFING"):
-        score += 1; factors.append("Engulfing 🔫")
-
-    if score < MIN_SCORE: return False
-
-    if signal_type == "BUY":
-        sl = entry - current_atr * SL_ATR_MULTIPLIER
+    if sig == "BUY":
+        if lower > body * 2.2 and lower > upper: 
+            return True, f"Bullish Pinbar {'(Vol Spike 🐳)' if vol_spike else ''}"
+        if p_cl <= p_op and c_cl > c_op and c_cl >= p_op and c_op <= p_cl: 
+            return True, f"Bullish Engulfing {'(Vol Spike 🐳)' if vol_spike else ''}"
     else:
-        sl = entry + current_atr * SL_ATR_MULTIPLIER
-
-    risk = abs(entry - sl)
-    dyn_rr = RR_TIER_3 if score >= 6 else RR_TIER_2
-    model_name = "🦄 UNICORN" if score >= 6 else "🔥 STRONG"
-    tp = entry + risk * dyn_rr if signal_type == "BUY" else entry - risk * dyn_rr
-
-    # CƠ CHẾ CHỐNG SPAM: Nếu biến ENABLE_ANTI_SPAM = True mới check
-    if ENABLE_ANTI_SPAM:
-        key = f"{symbol}_{tf}_{closed_df['ts'].iloc[-1]}"
-        if state_manager.is_alerted(key): return False
-
-    msg = (f"🚀 <b>SMC Action Bot v6.6 - {signal_type} {model_name}</b>\n"
-           f"Symbol: <b>{symbol}</b> ({tf})\n"
-           f"Score: <b>{score}/7</b>\n"
-           f"Entry: <code>{entry:.4f}</code>\n"
-           f"SL: <code>{sl:.4f}</code> <i>({SL_ATR_MULTIPLIER}ATR)</i>\n"
-           f"TP ({dyn_rr}R): <code>{tp:.4f}</code>\n"
-           f"────────────────\n"
-           f"🔍 Confluences:\n + " + "\n + ".join(factors))
-    send_telegram(msg)
-    print(f">>> {symbol} {tf}: TÍN HIỆU {signal_type} (Score {score})")
-    return True
+        if upper > body * 2.2 and upper > lower: 
+            return True, f"Bearish Pinbar {'(Vol Spike 🐳)' if vol_spike else ''}"
+        if p_cl >= p_op and c_cl < c_op and c_cl <= p_op and c_op >= p_cl: 
+            return True, f"Bearish Engulfing {'(Vol Spike 🐳)' if vol_spike else ''}"
+    return False, ""
 
 def send_telegram(msg):
-    if not ENABLE_ALERTS or not TELEGRAM_TOKEN: return
+    if not TELEGRAM_TOKEN: return
     for cid in CHAT_IDS:
         if not cid: continue
         try:
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                         json={"chat_id": cid, "text": msg, "parse_mode": "HTML"}, timeout=10)
-        except Exception as e:
-            print(f"Lỗi Telegram: {e}")
+                          json={"chat_id": cid, "text": msg, "parse_mode": "HTML"}, timeout=10)
+        except: pass
 
 # ==========================================
-# --- 6. MAIN ---
+# --- 5. ENGINE ANALYZE ---
+# ==========================================
+def analyze_pair(symbol, tf):
+    if ENABLE_KILLZONES:
+        est_hour = (datetime.utcnow() - timedelta(hours=5)).hour
+        if not ((8 <= est_hour <= 11) or (2 <= est_hour <= 5)): return False
+
+    htf = MTF_MAPPING.get(tf, '4h')
+    htf_trend = get_htf_trend(symbol, htf)
+    if htf_trend == "SIDEWAY": return False
+
+    bars = fetch_ohlcv_safe(symbol, tf, 500)
+    if not bars: return False
+
+    df = pd.DataFrame(bars, columns=['ts','open','high','low','close','vol'])
+    df['atr'] = calculate_atr(df)
+    df['rsi'] = calculate_rsi(df['close'])
+
+    atr = df['atr'].iloc[-2]
+    entry, sl, ob_idx, has_fvg, has_whale, has_sweep = find_quality_zone(df, htf_trend, atr)
+    if not has_fvg or entry == 0: return False
+
+    if (htf_trend == "UP" and df['low'].iloc[-2] <= sl) or (htf_trend == "DOWN" and df['high'].iloc[-2] >= sl):
+        return False
+
+    risk = abs(entry - sl)
+    score = 4
+    factors = [f"HTF {htf_trend} ✅", "Valid OB + FVG + Displacement ⚡"]
+
+    if has_whale: 
+        score += 1; factors.append("Whale Volume 🐳")
+    if has_sweep: 
+        score += 1; factors.append("Liquidity Sweep 🦈")
+    if is_premium_discount(entry, htf_trend, *get_swing_range(df)):
+        score += 1; factors.append("Premium/Discount 💎")
+
+    rsi = df['rsi'].iloc[-2]
+    if (htf_trend == "UP" and rsi < 48) or (htf_trend == "DOWN" and rsi > 52):
+        score += 1; factors.append(f"RSI Momentum ({rsi:.1f})")
+
+    if score < MIN_SCORE: return False
+
+    # [FIX] Mở rộng vùng search để không miss kèo tươi (Fresh Setup)
+    search = df.iloc[ob_idx+1:-1]
+    if search.empty: return False
+    tp = search['high'].max() if htf_trend == "UP" else search['low'].min()
+    rr = abs(tp - entry) / risk if risk > 0 else 0
+    if rr < 1.5: return False
+
+    bars_since = len(df) - 2 - ob_idx
+    if bars_since > MAX_BARS_LIMITS[tf] or abs(df['close'].iloc[-2] - entry) / atr > 5: return False
+
+    sig = "BUY" if htf_trend == "UP" else "SELL"
+    
+    tol = ENTRY_TOLERANCE * atr
+    tapped = (sig == "BUY" and df['low'].iloc[-2] <= entry + tol) or (sig == "SELL" and df['high'].iloc[-2] >= entry - tol)
+    
+    has_trig, trig_name = False, ""
+    if tapped:
+        has_trig, trig_name = check_ce_trigger(df, len(df)-2, sig)
+
+    exec_status = "CE Triggered ⚡" if has_trig else "Tapped 👀" if tapped else "Waiting ⏳"
+    
+    key = f"{symbol}_{tf}_{ob_idx}_{exec_status}"
+    if ENABLE_ORDER_ANTISPAM and state_manager.is_alerted(key): return False
+
+    model = "🦄 UNICORN" if score >= 7 else "🔥 STRONG"
+    factors_str = '\n• '.join(factors)
+    trigger_msg = f"\nTrigger PA: <b>{trig_name}</b>" if has_trig else ""
+
+    msg = f"""🚀 <b>SMC v7.1 PERFECT MASTER</b> - {sig} {model}
+{symbol} ({tf}) | Age: {bars_since}/{MAX_BARS_LIMITS[tf]}
+Score: <b>{score}/8</b> | {exec_status}{trigger_msg}
+
+Entry (OB EQ): <code>{entry:.4f}</code>
+SL: <code>{sl:.4f}</code> (Swing protected)
+TP: <code>{tp:.4f}</code> ({rr:.2f}R)
+
+Confluences:
+• {factors_str}"""
+
+    send_telegram(msg)
+    print(f">>> {symbol} {tf} | {exec_status} | Score {score} | {rr:.2f}R")
+    return True
+
+# ==========================================
+# --- MAIN RUNNER ---
 # ==========================================
 if __name__ == "__main__":
     start_time = datetime.now().strftime('%H:%M:%S')
-    print(f"🚀 SMC Action Bot v6.6 started at {start_time}")
+    print(f"🚀 SMC Screener v7.1 MASTER Started {start_time}")
+    
+    signals = 0
+    for sym in PAIRS:
+        for tf in MTF_MAPPING:
+            if analyze_pair(sym, tf):
+                signals += 1
+            time.sleep(1.3)
 
-    signals_found = 0
-    for symbol in PAIRS:
-        for tf in MTF_MAPPING.keys():
-            if analyze_pair(symbol, tf):
-                signals_found += 1
-            time.sleep(0.8)
-
-    if ENABLE_HEARTBEAT:
-        heartbeat = (f"🤖 <b>SMC Action Bot v6.6 - ALIVE 🟢</b>\n"
-                     f"Time: <code>{start_time}</code>\n"
-                     f"Quét {len(PAIRS)} pair • Tìm thấy <b>{signals_found}</b> signal")
-        send_telegram(heartbeat)
-
-    print(f"✅ Finished at {datetime.now().strftime('%H:%M:%S')} - {signals_found} signal(s)")
+    if signals == 0 and ENABLE_HEARTBEAT:
+        send_telegram(f"🤖 SMC v7.1 ALIVE 🟢\nĐang rình mồi tại {start_time}")
+    print("Scan hoàn tất.")
