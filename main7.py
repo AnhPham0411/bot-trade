@@ -8,39 +8,41 @@ import json
 from datetime import datetime
 from functools import wraps
 
-# ==========================================
-# --- 1. CẤU HÌNH & BẢNG ĐIỀU KHIỂN ---
-# ==========================================
+# ======================================================================
+# --- 1. USER CONFIGURATIONS (BẢNG ĐIỀU KHIỂN & TÙY CHỈNH) ---
+# ======================================================================
+
+# 🟢 1.1. TÙY CHỈNH COIN & KHUNG THỜI GIAN
 PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
 TIMEFRAMES = ['15m', '1h', '4h']
-MTF_MAPPING = {'15m': '1h', '1h': '4h', '4h': '1d'}
+MTF_MAPPING = {
+    '15m': '1h',   # Đánh 15m, lấy 1h làm bảo kê
+    '1h': '4h',    # Đánh 1h, lấy 4h làm bảo kê
+    '4h': '1d'     # Đánh 4h, lấy 1 ngày làm bảo kê
+}
+MAX_BARS_LIMITS = {'15m': 35, '1h': 80, '4h': 55, '1d': 40} # Độ rộng quét quá khứ tìm OB
 
-SL_ATR_MULTIPLIER = 1.8
-ENTRY_TOLERANCE = 0.6
-WHALE_VOL_MULTIPLIER = 1.8
-MIN_SCORE = 4
-MAX_BARS_LIMITS = {'15m': 35, '1h': 80, '4h': 55, '1d': 40}
+# 🔴 1.2. TÙY CHỈNH CHIẾN THUẬT & CHẤM ĐIỂM (SCORING)
+MIN_SCORE = 4                  # Điểm tối thiểu để bắn lệnh (MTF là 3 điểm + cần ít nhất 1 điểm Bonus)
+WHALE_VOL_MULTIPLIER = 1.5     # Cần Volume gấp mấy lần trung bình để được +1 điểm Bonus
+SL_ATR_MULTIPLIER = 1.8        # Nới Stoploss cộng thêm ATR x Hệ số này cho an toàn
 
-# ------------------------------------------
-# 🔴 CÔNG TẮC BỘ LỌC ÉP BUỘC (HARD FILTERS)
-# ------------------------------------------
-ENABLE_FILTER_VOLUME   = False  
-ENABLE_FILTER_SWEEP    = False  
-ENABLE_FILTER_PD_ARRAY = False  
+# 🟡 1.3. CÔNG TẮC HỆ THỐNG
+ENABLE_ORDER_ANTISPAM = True   # Chống spam: Mỗi setup chỉ báo 1 lần
+ENABLE_HEARTBEAT = True        # Cứ mỗi lần chạy hết vòng lặp sẽ báo cáo bot vẫn sống
 
-# ------------------------------------------
-# CÔNG TẮC HỆ THỐNG
-# ------------------------------------------
-ENABLE_ORDER_ANTISPAM = True
-ENABLE_HEARTBEAT = True
-ENABLE_KILLZONES = False
-
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-user_chat_id = os.getenv('TELEGRAM_CHAT_ID')
+# 🔵 1.4. CẤU HÌNH TELEGRAM & SÀN
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN') # Có thể thay bằng chuỗi "TOKEN_CỦA_BẠN_Ở_ĐÂY"
+user_chat_id = os.getenv('TELEGRAM_CHAT_ID')   # Có thể thay bằng chuỗi "ID_CỦA_BẠN_Ở_ĐÂY"
 group_chat_id = "-5213535598"
 CHAT_IDS = [cid for cid in [user_chat_id, group_chat_id] if cid]
 
+# Khởi tạo kết nối MEXC
 exchange = ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
+
+# ======================================================================
+# --- KẾT THÚC PHẦN CẤU HÌNH. BÊN DƯỚI LÀ LÕI LOGIC (KHÔNG CẦN SỬA) ---
+# ======================================================================
 
 # ==========================================
 # --- HÀM TIỆN ÍCH (UTILS) ---
@@ -94,10 +96,8 @@ class GistStateManager:
                 content = gist_data['files'].get(self.filename, {}).get('content', '[]')
                 data = json.loads(content)
                 return data if isinstance(data, list) else []
-            else:
-                print(f"Không thể đọc Gist. Status Code: {response.status_code}")
-        except Exception as e:
-            print(f"Lỗi kết nối Gist (Load): {e}")
+        except Exception:
+            pass
         return []
 
     def save(self, new_item):
@@ -122,8 +122,8 @@ class GistStateManager:
                 }
             }
             requests.patch(url, headers=self.headers, json=payload)
-        except Exception as e:
-            print(f"Lỗi kết nối Gist (Save): {e}")
+        except Exception:
+            pass
 
 # ==========================================
 # --- 3. MARKET REGIME AGENT ---
@@ -159,7 +159,7 @@ class MarketRegimeAgent:
         return "SIDEWAY"
 
 # ==========================================
-# --- 4. SIGNAL AGENT (Lõi SMC + MTF) ---
+# --- 4. SIGNAL AGENT (Lõi SMC + MTF + Scoring) ---
 # ==========================================
 class SignalAgent:
     def __init__(self):
@@ -180,12 +180,12 @@ class SignalAgent:
         return False, None
 
     def check_confirmation(self, df, direction, ob_high, ob_low, ob_idx):
-        """Hàm kiểm tra xác nhận Sweep/Volume tại vùng POI"""
+        """Kiểm tra giá chạm POI và tính điểm Bonus"""
         latest_idx = len(df) - 1
         latest_candle = df.iloc[latest_idx]
 
         action_df = df.iloc[ob_idx+2 : latest_idx+1]
-        if len(action_df) == 0: return False, None
+        if len(action_df) == 0: return False, 0, None
 
         if direction == "BUY":
             tapped = action_df['low'].min() <= ob_high
@@ -195,32 +195,46 @@ class SignalAgent:
             invalidated = action_df['close'].max() > ob_high 
 
         if not tapped or invalidated:
-            return False, None
+            return False, 0, None
 
         body = abs(latest_candle['close'] - latest_candle['open'])
         total = latest_candle['high'] - latest_candle['low']
-        if total == 0: return False, None
+        if total == 0: return False, 0, None
+        
+        # --- HỆ THỐNG CHẤM ĐIỂM BONUS ---
+        bonus_score = 0
         
         avg_vol = df['vol'].iloc[max(0, latest_idx-15):latest_idx].mean()
         has_vol = latest_candle['vol'] >= avg_vol * WHALE_VOL_MULTIPLIER
+        if has_vol: bonus_score += 1 # Nổ Volume được 1 điểm
 
         is_reversal = False
         
         if direction == "BUY":
+            # Quét râu đáy cũ (15 nến trước)
+            if latest_candle['low'] <= df['low'].iloc[max(0, latest_idx-15):latest_idx].min():
+                bonus_score += 1
+                
             lower_wick = min(latest_candle['open'], latest_candle['close']) - latest_candle['low']
             is_sweep = latest_candle['low'] < ob_low and latest_candle['close'] >= ob_low
-            if (lower_wick > body * 1.2 and has_vol) or is_sweep or (latest_candle['close'] > latest_candle['open'] and has_vol):
+            
+            if (lower_wick > body * 1.2) or is_sweep or (latest_candle['close'] > latest_candle['open'] and has_vol):
                 is_reversal = True
         else:
+            # Quét râu đỉnh cũ
+            if latest_candle['high'] >= df['high'].iloc[max(0, latest_idx-15):latest_idx].max():
+                bonus_score += 1
+                
             upper_wick = latest_candle['high'] - max(latest_candle['open'], latest_candle['close'])
             is_sweep = latest_candle['high'] > ob_high and latest_candle['close'] <= ob_high
-            if (upper_wick > body * 1.2 and has_vol) or is_sweep or (latest_candle['close'] < latest_candle['open'] and has_vol):
+            
+            if (upper_wick > body * 1.2) or is_sweep or (latest_candle['close'] < latest_candle['open'] and has_vol):
                 is_reversal = True
 
         if is_reversal:
-            return True, latest_candle['close'] 
+            return True, bonus_score, latest_candle['close'] 
             
-        return False, None
+        return False, 0, None
 
     def scan_mtf_setups(self, symbol, df_ltf, df_htf, ltf_str, htf_str, trend_htf, state_manager):
         if trend_htf == "UNKNOWN": return None
@@ -243,7 +257,7 @@ class SignalAgent:
                         "low": df_htf['low'].iloc[i]
                     })
                     
-        if not htf_pois: return None # Không có cản cứng thì bỏ qua
+        if not htf_pois: return None 
 
         # --- BƯỚC 2: TÌM POI KHUNG NHỎ (LTF) VÀ CHECK LỒNG NHAU ---
         atr_ltf = df_ltf['atr'].iloc[-1]
@@ -260,43 +274,47 @@ class SignalAgent:
                     
                     ob_high_ltf, ob_low_ltf = df_ltf['high'].iloc[i], df_ltf['low'].iloc[i]
                     
-                    # Kiểm tra lồng nhau (Confluence)
                     is_nested = False
                     for poi in htf_pois:
                         if poi['dir'] == direction:
-                            # POI LTF phải nằm đè lên hoặc lọt thỏm trong POI HTF
                             if (ob_high_ltf <= poi['high'] and ob_high_ltf >= poi['low']) or \
                                (ob_low_ltf >= poi['low'] and ob_low_ltf <= poi['high']):
                                 is_nested = True
                                 break
                                 
                     if not is_nested:
-                        continue # Đẹp mà lơ lửng thì cũng bỏ
+                        continue 
+                        
+                    # --- Đã lồng khung -> Khởi điểm 3 sao ---
+                    base_score = 3 
 
                     setup_id = f"{symbol}_{df_ltf['ts'].iloc[i]}_{direction}_{ltf_str}"
                     watch_id = "WATCH_" + setup_id
                     exec_id = "EXEC_" + setup_id
                     
-                    # Tính SL theo khung nhỏ (Tối ưu R:R)
                     sl = ob_low_ltf - (atr_ltf * 0.5) if direction == "BUY" else ob_high_ltf + (atr_ltf * 0.5)
                     
-                    is_confirmed, market_price = self.check_confirmation(df_ltf, direction, ob_high_ltf, ob_low_ltf, i)
+                    is_confirmed, bonus_score, market_price = self.check_confirmation(df_ltf, direction, ob_high_ltf, ob_low_ltf, i)
 
                     if is_confirmed:
-                        if ENABLE_ORDER_ANTISPAM and exec_id in state_manager.state:
-                            continue 
-                            
-                        risk = abs(market_price - sl)
-                        tp1 = market_price + risk * 1.5 if direction == "BUY" else market_price - risk * 1.5
-                        tp2 = market_price + risk * 3.0 if direction == "BUY" else market_price - risk * 3.0
+                        total_score = base_score + bonus_score
                         
-                        state_manager.save(exec_id)
-                        return {
-                            "type": "EXECUTION", "direction": direction, "market_price": market_price,
-                            "ob_high": ob_high_ltf, "ob_low": ob_low_ltf, "sl": sl, "tp1": tp1, "tp2": tp2,
-                            "signal_name": f"{'Bullish' if direction=='BUY' else 'Bearish'} Confirmed Entry",
-                            "ltf": ltf_str, "htf": htf_str
-                        }
+                        # Chỉ bắn lệnh nếu qua mốc MIN_SCORE
+                        if total_score >= MIN_SCORE:
+                            if ENABLE_ORDER_ANTISPAM and exec_id in state_manager.state:
+                                continue 
+                                
+                            risk = abs(market_price - sl)
+                            tp1 = market_price + risk * 1.5 if direction == "BUY" else market_price - risk * 1.5
+                            tp2 = market_price + risk * 3.0 if direction == "BUY" else market_price - risk * 3.0
+                            
+                            state_manager.save(exec_id)
+                            return {
+                                "type": "EXECUTION", "direction": direction, "market_price": market_price,
+                                "ob_high": ob_high_ltf, "ob_low": ob_low_ltf, "sl": sl, "tp1": tp1, "tp2": tp2,
+                                "signal_name": f"{'Bullish' if direction=='BUY' else 'Bearish'} Confirmed Entry",
+                                "ltf": ltf_str, "htf": htf_str, "score": total_score
+                            }
                     
                     elif not is_confirmed and (watch_id not in state_manager.state):
                         state_manager.save(watch_id)
@@ -331,11 +349,12 @@ class ExecutionAgent:
 """
         else:
             icon = "🚀" if signal['direction'] == "BUY" else "💥"
+            stars = "⭐" * signal['score']
             msg = f"""
 {icon} <b>SMC MARKET EXECUTION | {symbol}</b>
 ───────────────
 <b>Khung đánh:</b> {ltf} (Bảo kê bởi {htf})
-<b>Xác nhận:</b> Volume/Sweep đảo chiều thành công!
+<b>Độ uy tín:</b> {signal['score']}/5 {stars}
 <b>Action:</b> VÀO LỆNH MARKET {signal['direction']} NGAY
 
 <b>Giá Market (Entry):</b> {signal['market_price']:.4f}
@@ -359,7 +378,7 @@ class ExecutionAgent:
         for chat_id in CHAT_IDS:
             try:
                 url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-                response = requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+                requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
             except Exception:
                 pass
 
@@ -398,7 +417,7 @@ def main():
                 if signal['type'] == 'WATCHING':
                     print(f">>> [MỚI] Dò thấy vùng POI cho {symbol} ({ltf}). Đưa vào danh sách theo dõi.")
                 else:
-                    print(f">>> [XÁC NHẬN] Có tín hiệu đảo chiều {symbol} ({ltf}). Bắn lệnh Market ngay!")
+                    print(f">>> [XÁC NHẬN] Có tín hiệu đảo chiều {symbol} ({ltf}) - Uy tín: {signal['score']} SAO. Bắn lệnh ngay!")
                     
                 execution_agent.send_telegram(symbol, signal)
                 
