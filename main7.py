@@ -298,6 +298,7 @@ class ExecutionAgent:
             
         stars = "⭐" * signal['score']
         
+        # MỞ DẤU 3 NHÁY KÉP
         msg = f"""
 {icon} <b>SMC SIGNAL {TIMEFRAME} | {symbol}</b>
 ───────────────
@@ -307,4 +308,21 @@ class ExecutionAgent:
 <b>Tuổi Setup:</b> {signal['age']} nến
 <b>Trạng thái:</b> {dist_status}
 
-<b>Entry:</b> {signal['entry']:.
+<b>Entry:</b> {signal['entry']:.4f}
+<b>Stoploss:</b> {signal['sl']:.4f}
+───────────────
+<b>🎯 TP1 (RR 1:1.5):</b> {signal['tp1']:.4f} (Chốt 1/2 vị thế)
+<b>🎯 TP2 (RR 1:2.5):</b> {signal['tp2']:.4f}
+
+<b>Giá hiện tại:</b> {signal['price']:.4f}
+"""
+        # ĐÓNG DẤU 3 NHÁY KÉP Ở TRÊN ^^ (Lỗi của bạn nằm ở đây)
+
+        for chat_id in CHAT_IDS:
+            try:
+                url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+                response = requests.post(url, json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"})
+                if response.status_code != 200:
+                    print(f"Lỗi khi gửi cho ID {chat_id}: {response.text}")
+            except Exception as e:
+                print(f"Lỗi gửi Tele đến {chat_id}: {e}")
