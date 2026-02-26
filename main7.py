@@ -12,7 +12,7 @@ from functools import wraps
 # --- 1. CẤU HÌNH & BẢNG ĐIỀU KHIỂN ---
 # ==========================================
 PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
-TIMEFRAME = '1h'
+TIMEFRAMES = ['15m', '1h', '4h']
 MTF_MAPPING = {'15m': '1h', '1h': '4h', '4h': '1d'}
 
 SL_ATR_MULTIPLIER = 1.8
