@@ -23,8 +23,8 @@ MTF_MAPPING = {
 MAX_BARS_LIMITS = {'15m': 35, '1h': 80, '4h': 55, '1d': 40} # Độ rộng quét quá khứ tìm OB
 
 # 🔴 1.2. TÙY CHỈNH CHIẾN THUẬT & CHẤM ĐIỂM (SCORING)
-MIN_SCORE = 4                  # Điểm tối thiểu để bắn lệnh (MTF là 3 điểm + cần ít nhất 1 điểm Bonus)
-WHALE_VOL_MULTIPLIER = 1.5     # Cần Volume gấp mấy lần trung bình để được +1 điểm Bonus
+MIN_SCORE = 3                   # Điểm tối thiểu để bắn lệnh (MTF là 3 điểm + cần ít nhất 1 điểm Bonus)
+WHALE_VOL_MULTIPLIER = 1.35     # Cần Volume gấp mấy lần trung bình để được +1 điểm Bonus
 SL_ATR_MULTIPLIER = 1.8        # Nới Stoploss cộng thêm ATR x Hệ số này cho an toàn
 
 # 🟡 1.3. CÔNG TẮC HỆ THỐNG
