@@ -1,0 +1,133 @@
+import pandas as pd
+import numpy as np
+import ccxt
+from datetime import datetime
+
+# === PASTE TOÀN BỘ FUNCTIONS TỪ SCRIPT CŨ CỦA BẠN VÀO ĐÂY (từ calculate_ema đến is_trigger_candle) ===
+# (Tôi đã rút gọn để ngắn, bạn chỉ cần copy phần từ dòng # ========================================== đến trước if __name__ của script cũ)
+
+PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
+MTF_MAPPING = {'1h': '4h'}          # chỉ test 1h như bạn yêu cầu
+SL_ATR_MULTIPLIER = 1.8
+ENTRY_TOLERANCE = 0.6
+WHALE_VOL_MULTIPLIER = 1.8
+MIN_SCORE = 5
+MAX_BARS_LIMITS = {'1h': 80}
+
+exchange = ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
+
+# === FUNCTIONS CỦA BẠN (paste nguyên từ script cũ) ===
+# ... (calculate_ema, calculate_atr, calculate_rsi, identify_fractals, has_fvg, is_mitigated, is_strong_displacement,
+# find_quality_zone, get_htf_trend, get_swing_range, is_premium_discount, is_trigger_candle) ...
+
+# === BACKTEST LOGIC ===
+trades = []
+capital = 1000.0  # vốn ban đầu
+position_size_usd = 100.0  # mỗi lệnh 100$ như bạn yêu cầu
+leverage = 10  # bạn có thể chỉnh
+
+for symbol in PAIRS:
+    print(f"\n🔍 Backtesting {symbol} 1h...")
+    bars = exchange.fetch_ohlcv(symbol, '1h', limit=1200)  # 1200 nến \~50 ngày, đủ để test 500 nến cuối
+    df = pd.DataFrame(bars, columns=['ts','open','high','low','close','vol'])
+    df = identify_fractals(df)
+    df['atr'] = calculate_atr(df)
+    df['rsi'] = calculate_rsi(df['close'])
+
+    for i in range(400, len(df)-5):  # bắt đầu sau khi có đủ dữ liệu
+        current_df = df.iloc[:i+1].copy().reset_index(drop=True)
+        htf_trend = get_htf_trend(symbol, '4h')  # vẫn dùng fetch (local sẽ ok)
+        if htf_trend == "SIDEWAY": continue
+
+        entry, sl, ob_idx, has_fvg, has_whale, has_sweep = find_quality_zone(current_df, htf_trend, current_df['atr'].iloc[-1])
+        if not has_fvg or entry == 0: continue
+
+        # Các filter giống script gốc
+        risk = abs(entry - sl)
+        score = 4
+        if has_whale: score += 1
+        if has_sweep: score += 1
+        if is_premium_discount(entry, htf_trend, *get_swing_range(current_df)): score += 1
+        rsi = current_df['rsi'].iloc[-1]
+        if (htf_trend == "UP" and rsi < 48) or (htf_trend == "DOWN" and rsi > 52): score += 1
+        if score < MIN_SCORE: continue
+
+        search = current_df.iloc[ob_idx+5:i]
+        tp = search['high'].max() if htf_trend == "UP" else search['low'].min()
+        rr = abs(tp - entry) / risk if risk > 0 else 0
+        if rr < 1.5: continue
+
+        bars_since = i - ob_idx
+        if bars_since > MAX_BARS_LIMITS['1h']: continue
+
+        sig = "BUY" if htf_trend == "UP" else "SELL"
+        has_trig, _ = is_trigger_candle(current_df, i, sig)
+        tol = ENTRY_TOLERANCE * current_df['atr'].iloc[-1]
+        tapped = (sig == "BUY" and current_df.iloc[-1]['low'] <= entry + tol) or \
+                 (sig == "SELL" and current_df.iloc[-1]['high'] >= entry - tol)
+
+        if not tapped: continue  # chỉ vào khi đã Tapped hoặc Triggered (giống thực tế)
+
+        # === SIMULATE TRADE với 100$ ===
+        entry_price = entry
+        size = (position_size_usd * leverage) / entry_price   # quantity
+        risk_amount = position_size_usd * 0.01 * leverage * (risk / entry_price)  # risk \~1% của position
+
+        # Kiểm tra từ nến sau khi vào đến hết data xem hit SL hay TP trước
+        hit_sl = False
+        hit_tp = False
+        exit_price = None
+        for j in range(i+1, len(df)):
+            candle = df.iloc[j]
+            if sig == "BUY":
+                if candle['low'] <= sl: 
+                    hit_sl = True
+                    exit_price = sl
+                    break
+                if candle['high'] >= tp: 
+                    hit_tp = True
+                    exit_price = tp
+                    break
+            else:
+                if candle['high'] >= sl: 
+                    hit_sl = True
+                    exit_price = sl
+                    break
+                if candle['low'] <= tp: 
+                    hit_tp = True
+                    exit_price = tp
+                    break
+
+        if hit_sl or hit_tp:
+            pnl = (exit_price - entry_price) / entry_price * position_size_usd * leverage if sig == "BUY" else \
+                  (entry_price - exit_price) / entry_price * position_size_usd * leverage
+            win = pnl > 0
+            trades.append({
+                'symbol': symbol,
+                'time': datetime.fromtimestamp(df['ts'].iloc[i]/1000),
+                'sig': sig,
+                'entry': entry_price,
+                'sl': sl,
+                'tp': tp,
+                'rr': rr,
+                'pnl': pnl,
+                'win': win
+            })
+
+# === BÁO CÁO KẾT QUẢ ===
+if trades:
+    df_trades = pd.DataFrame(trades)
+    winrate = df_trades['win'].mean() * 100
+    total_pnl = df_trades['pnl'].sum()
+    avg_rr = df_trades['rr'].mean()
+
+    print(f"\n📊 BACKTEST KẾT QUẢ (500+ nến 1h gần nhất)")
+    print(f"Số lệnh: {len(df_trades)}")
+    print(f"Winrate: {winrate:.1f}%")
+    print(f"Total PnL: ${total_pnl:.2f} (với $100/lệnh)")
+    print(f"Avg RR: {avg_rr:.2f}")
+    print(f"Max drawdown ước tính: {df_trades['pnl'].cumsum().min():.2f}$")
+    print("\nChi tiết lệnh:")
+    print(df_trades[['time','symbol','sig','rr','pnl','win']])
+else:
+    print("Không tìm thấy lệnh nào thỏa mãn trong 500 nến (strategy strict).")
