@@ -172,7 +172,7 @@ class MarketRegimeAgent:
         return "SIDEWAY"
 
 # ==========================================
-# --- 4. SIGNAL AGENT (Lõi SMC + Scoring) ---
+# --- 4. SIGNAL AGENT (Lõi SMC + Confirmation) ---
 # ==========================================
 class SignalAgent:
     def __init__(self):
@@ -192,91 +192,105 @@ class SignalAgent:
         if df['high'].iloc[idx + 2] < df['low'].iloc[idx]: return True, "bearish"
         return False, None
 
+    def check_confirmation(self, df, direction, ob_high, ob_low, ob_idx):
+        """Hàm kiểm tra xác nhận tại vùng POI"""
+        latest_idx = len(df) - 1
+        latest_candle = df.iloc[latest_idx]
+
+        # Kiểm tra từ lúc sinh ra OB đến hiện tại
+        action_df = df.iloc[ob_idx+2 : latest_idx+1]
+        if len(action_df) == 0: return False, None
+
+        # 1. Kiểm tra giá đã chạm vùng POI chưa và có bị phá vỡ hẳn không?
+        if direction == "BUY":
+            tapped = action_df['low'].min() <= ob_high
+            invalidated = action_df['close'].min() < ob_low # Đóng nến thủng OB -> Bỏ
+        else:
+            tapped = action_df['high'].max() >= ob_low
+            invalidated = action_df['close'].max() > ob_high # Đóng nến qua OB -> Bỏ
+
+        if not tapped or invalidated:
+            return False, None
+
+        # 2. Điều kiện nến xác nhận (Nến vừa đóng)
+        body = abs(latest_candle['close'] - latest_candle['open'])
+        total = latest_candle['high'] - latest_candle['low']
+        if total == 0: return False, None
+        
+        avg_vol = df['vol'].iloc[max(0, latest_idx-15):latest_idx].mean()
+        has_vol = latest_candle['vol'] >= avg_vol * WHALE_VOL_MULTIPLIER
+
+        is_reversal = False
+        
+        if direction == "BUY":
+            lower_wick = min(latest_candle['open'], latest_candle['close']) - latest_candle['low']
+            # Xác nhận: Rút chân dài ở vùng dưới HOẶC nến xanh có Vol lớn
+            is_sweep = latest_candle['low'] < ob_low and latest_candle['close'] >= ob_low
+            if (lower_wick > body * 1.2 and has_vol) or is_sweep or (latest_candle['close'] > latest_candle['open'] and has_vol):
+                is_reversal = True
+        else:
+            upper_wick = latest_candle['high'] - max(latest_candle['open'], latest_candle['close'])
+            is_sweep = latest_candle['high'] > ob_high and latest_candle['close'] <= ob_high
+            if (upper_wick > body * 1.2 and has_vol) or is_sweep or (latest_candle['close'] < latest_candle['open'] and has_vol):
+                is_reversal = True
+
+        if is_reversal:
+            return True, latest_candle['close'] # Trả về giá Market để vào lệnh
+            
+        return False, None
+
     def scan_for_setups(self, symbol, df, trend, state_manager):
         if trend == "UNKNOWN": return None
 
-        atr, current_close, last_idx = df['atr'].iloc[-1], df['close'].iloc[-1], len(df) - 1
-        
-        # Tính Premium/Discount dựa trên 50 nến gần nhất
-        swing_high, swing_low = df['high'].iloc[-50:].max(), df['low'].iloc[-50:].min()
-        swing_range = swing_high - swing_low
-        eq = swing_high - (swing_range * 0.5) if swing_range > 0 else 0
-        
+        atr = df['atr'].iloc[-1]
         max_bars_lookback = MAX_BARS_LIMITS.get(TIMEFRAME, 50)
         
         for i in range(len(df) - max_bars_lookback, len(df) - 2):
-            setup_id = f"{symbol}_{df['ts'].iloc[i]}_{trend}"
-            
-            # Anti-spam: Nếu đã ghi vào Gist thì bỏ qua, không báo lại nữa
-            if ENABLE_ORDER_ANTISPAM and setup_id in state_manager.state:
-                continue
-
             direction = None
-            if trend in ["UP", "SIDEWAY"] and df['close'].iloc[i] < df['open'].iloc[i]:
-                direction = "BUY"
-            elif trend in ["DOWN", "SIDEWAY"] and df['close'].iloc[i] > df['open'].iloc[i]:
-                direction = "SELL"
+            if trend in ["UP", "SIDEWAY"] and df['close'].iloc[i] < df['open'].iloc[i]: direction = "BUY"
+            elif trend in ["DOWN", "SIDEWAY"] and df['close'].iloc[i] > df['open'].iloc[i]: direction = "SELL"
 
             if direction and self.check_displacement(df, i+1, direction):
                 has_fvg, fvg_dir = self.check_fvg(df, i)
                 if (direction == "BUY" and fvg_dir == "bullish") or (direction == "SELL" and fvg_dir == "bearish"):
                     
-                    entry = (df['high'].iloc[i] + df['low'].iloc[i]) / 2
+                    ob_high, ob_low = df['high'].iloc[i], df['low'].iloc[i]
+                    setup_id = f"{symbol}_{df['ts'].iloc[i]}_{direction}"
                     
-                    # --- HỆ THỐNG CHẤM ĐIỂM (SCORING) ---
-                    score = 3 # Điểm gốc cho Setup OB + FVG hợp lệ
+                    # Trạng thái 1: Chưa báo WATCHING -> Báo để rình
+                    watch_id = "WATCH_" + setup_id
+                    exec_id = "EXEC_" + setup_id
                     
-                    # 1. Điểm Sweep (Quét thanh khoản)
-                    is_sweep = False
-                    if direction == "BUY": is_sweep = df['low'].iloc[i] <= df['low'].iloc[max(0, i-15):i].min()
-                    else: is_sweep = df['high'].iloc[i] >= df['high'].iloc[max(0, i-15):i].max()
+                    # Tính SL nới rộng hơn chút cho an toàn
+                    sl = ob_low - (atr * 0.5) if direction == "BUY" else ob_high + (atr * 0.5)
                     
-                    if is_sweep: score += 1
-                    elif ENABLE_FILTER_SWEEP: continue # Bị chặn bởi Hard Filter
-                    
-                    # 2. Điểm Volume (Cá mập)
-                    has_vol = False
-                    avg_vol = df['vol'].iloc[max(0, i-19):i+1].mean()
-                    if df['vol'].iloc[i+1] >= avg_vol * WHALE_VOL_MULTIPLIER: has_vol = True
-                        
-                    if has_vol: score += 1
-                    elif ENABLE_FILTER_VOLUME: continue
-                    
-                    # 3. Điểm PD Array (Vị thế đẹp)
-                    is_optimal_pd = False
-                    if swing_range > 0:
-                        if trend == "UP" and entry <= eq: is_optimal_pd = True
-                        elif trend == "DOWN" and entry >= eq: is_optimal_pd = True
-                        elif trend == "SIDEWAY":
-                            if direction == "BUY" and entry <= swing_low + (swing_range * 0.3): is_optimal_pd = True
-                            if direction == "SELL" and entry >= swing_high - (swing_range * 0.3): is_optimal_pd = True
+                    # Kiểm tra xem có nến xác nhận Market không
+                    is_confirmed, market_price = self.check_confirmation(df, direction, ob_high, ob_low, i)
+
+                    if is_confirmed:
+                        if ENABLE_ORDER_ANTISPAM and exec_id in state_manager.state:
+                            continue # Đã bắn lệnh rồi thì thôi
                             
-                    if is_optimal_pd: score += 1
-                    elif ENABLE_FILTER_PD_ARRAY: continue
-
-                    # Lọc theo MIN_SCORE
-                    if score < MIN_SCORE: continue
-
-                    # --- TÍNH TOÁN RỦI RO & TP ---
-                    if direction == "BUY":
-                        sl = df['low'].iloc[i] - (atr * SL_ATR_MULTIPLIER)
-                        if (df['low'].iloc[i+2:] <= entry).any(): continue # Loại bỏ ngay nếu giá đã Mitigation
-                    else:
-                        sl = df['high'].iloc[i] + (atr * SL_ATR_MULTIPLIER)
-                        if (df['high'].iloc[i+2:] >= entry).any(): continue
-
-                    risk = abs(entry - sl)
-                    tp1 = entry + risk * 1.5 if direction == "BUY" else entry - risk * 1.5
-                    tp2 = entry + risk * 2.5 if direction == "BUY" else entry - risk * 2.5
+                        # Tính TP theo R:R thực tế từ giá Market
+                        risk = abs(market_price - sl)
+                        tp1 = market_price + risk * 1.5 if direction == "BUY" else market_price - risk * 1.5
+                        tp2 = market_price + risk * 2.5 if direction == "BUY" else market_price - risk * 2.5
                         
-                    # Lưu bộ nhớ và xuất tín hiệu
-                    state_manager.save(setup_id)
-                    return {
-                        "direction": direction, "entry": entry, "sl": sl, 
-                        "tp1": tp1, "tp2": tp2, "score": score,
-                        "type": f"{'Bullish' if direction=='BUY' else 'Bearish'} OB+FVG", 
-                        "age": last_idx - i, "price": current_close
-                    }
+                        state_manager.save(exec_id)
+                        return {
+                            "type": "EXECUTION", "direction": direction, "market_price": market_price,
+                            "ob_high": ob_high, "ob_low": ob_low, "sl": sl, "tp1": tp1, "tp2": tp2,
+                            "signal_name": f"{'Bullish' if direction=='BUY' else 'Bearish'} Confirmed Entry"
+                        }
+                    
+                    elif not is_confirmed and (watch_id not in state_manager.state):
+                        # Gửi cảnh báo theo dõi nếu chưa gửi
+                        state_manager.save(watch_id)
+                        return {
+                            "type": "WATCHING", "direction": direction, 
+                            "ob_high": ob_high, "ob_low": ob_low,
+                            "signal_name": f"Dò thấy {'Bullish' if direction=='BUY' else 'Bearish'} POI"
+                        }
         return None
 
 # ==========================================
@@ -284,43 +298,53 @@ class SignalAgent:
 # ==========================================
 class ExecutionAgent:
     def send_telegram(self, symbol, signal):
-        if not TELEGRAM_TOKEN or "ĐIỀN" in TELEGRAM_TOKEN:
-            print(f"[{symbol}] Có lệnh nhưng chưa cài TELEGRAM_TOKEN để gửi.")
-            return
+        if not TELEGRAM_TOKEN or "ĐIỀN" in TELEGRAM_TOKEN: return
 
-        icon = "🟢" if signal['direction'] == "BUY" else "🔴"
-        dist = abs(signal['price'] - signal['entry']) / signal['entry'] * 100
-        dist_status = f"Cách Entry {dist:.2f}%"
-        if dist < 0.1:
-            dist_status = "🔥 Cực sát vùng Entry!"
-            
-        stars = "⭐" * signal['score']
-        
-        msg = f"""
-{icon} <b>SMC SIGNAL {TIMEFRAME} | {symbol}</b>
+        if signal['type'] == "WATCHING":
+            icon = "👀"
+            msg = f"""
+{icon} <b>SMC WATCHING | {symbol} {TIMEFRAME}</b>
 ───────────────
-<b>Setup:</b> {signal['type']}
-<b>Điểm chất lượng:</b> {signal['score']}/6 {stars}
-<b>Action:</b> Limit {signal['direction']}
-<b>Tuổi Setup:</b> {signal['age']} nến
-<b>Trạng thái:</b> {dist_status}
+<b>Trạng thái:</b> Đang rình vùng POI
+<b>Action:</b> Canh {signal['direction']}
+<b>Vùng quét (OB):</b> {signal['ob_low']:.4f} - {signal['ob_high']:.4f}
 
-<b>Entry:</b> {signal['entry']:.4f}
+<i>*Bot sẽ tự động bắn lệnh Market nếu xuất hiện nến xác nhận có Volume / Sweep tại vùng này. Giữ im lặng...</i>
+"""
+        else:
+            icon = "🚀" if signal['direction'] == "BUY" else "💥"
+            msg = f"""
+{icon} <b>SMC MARKET EXECUTION | {symbol} {TIMEFRAME}</b>
+───────────────
+<b>Xác nhận:</b> Volume/Sweep đảo chiều thành công!
+<b>Action:</b> VÀO LỆNH MARKET {signal['direction']} NGAY
+
+<b>Giá Market (Entry):</b> {signal['market_price']:.4f}
 <b>Stoploss:</b> {signal['sl']:.4f}
 ───────────────
-<b>🎯 TP1 (RR 1:1.5):</b> {signal['tp1']:.4f} (Chốt 1/2 vị thế)
+<b>🎯 TP1 (RR 1:1.5):</b> {signal['tp1']:.4f}
 <b>🎯 TP2 (RR 1:2.5):</b> {signal['tp2']:.4f}
-
-<b>Giá hiện tại:</b> {signal['price']:.4f}
 """
+        
         for chat_id in CHAT_IDS:
             try:
                 url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-                response = requests.post(url, json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"})
-                if response.status_code != 200:
-                    print(f"Lỗi khi gửi cho ID {chat_id}: {response.text}")
+                requests.post(url, json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"})
             except Exception as e:
-                print(f"Lỗi gửi Tele đến {chat_id}: {e}")
+                pass
+
+    def send_text(self, text):
+        if not TELEGRAM_TOKEN or "ĐIỀN" in TELEGRAM_TOKEN:
+            return
+
+        for chat_id in CHAT_IDS:
+            try:
+                url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+                response = requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+                if response.status_code != 200:
+                    print(f"Lỗi khi gửi text cho ID {chat_id}: {response.text}")
+            except Exception as e:
+                print(f"Lỗi gửi Tele text đến {chat_id}: {e}")
 
 # ==========================================
 # --- 6. HỆ THỐNG VẬN HÀNH CHÍNH (MAIN) ---
@@ -348,14 +372,20 @@ def main():
         
         if signal:
             signals_found += 1
-            print(f">>> Vừa nổ tín hiệu {signal['score']} SAO cho {symbol}. Đang gửi Telegram...")
+            if signal['type'] == 'WATCHING':
+                print(f">>> [MỚI] Dò thấy vùng POI cho {symbol}. Đưa vào danh sách theo dõi.")
+            else:
+                print(f">>> [XÁC NHẬN] Có tín hiệu đảo chiều {symbol}. Bắn lệnh Market ngay!")
+                
             execution_agent.send_telegram(symbol, signal)
             
     if signals_found == 0:
         print("Không có tín hiệu nào thỏa mãn lúc này.")
         
     if ENABLE_HEARTBEAT:
-        print(f"[{run_time}] Hệ thống vẫn đang chạy ổn định (Heartbeat OK).")
+        heartbeat_msg = f"⏱ <b>[{run_time}]</b> Hệ thống SMC Bot vẫn đang hoạt động ổn định."
+        print(heartbeat_msg)
+        execution_agent.send_text(heartbeat_msg)
 
 if __name__ == "__main__":
     main()
