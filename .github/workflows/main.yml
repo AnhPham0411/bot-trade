@@ -73,3 +73,14 @@ jobs:
         GH_GIST_TOKEN: ${{ secrets.GH_GIST_TOKEN }} # Cấp quyền cho Gist
         GIST_ID: ${{ secrets.GIST_ID }}             # ID của file Gist
       run: python main7.py
+
+# --- CHẠY BOT 5 (unicorn update) ---
+    - name: Run test bot7
+      continue-on-error: true
+      env:
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN_1 }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        GH_GIST_TOKEN: ${{ secrets.GH_GIST_TOKEN }} # Cấp quyền cho Gist
+        GIST_ID: ${{ secrets.GIST_ID }}             # ID của file Gist
+      run: python test.py
+
