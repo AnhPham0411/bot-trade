@@ -280,7 +280,7 @@ class SignalAgent:
         return None
 
 # ==========================================
-# --- 5. EXECUTION AGENT (Telegram Báo Cáo) ---
+# --- 5. EXECUTION AGENT (Telegram) ---
 # ==========================================
 class ExecutionAgent:
     def send_telegram(self, symbol, signal):
@@ -289,8 +289,6 @@ class ExecutionAgent:
             return
 
         icon = "🟢" if signal['direction'] == "BUY" else "🔴"
-        
-        # Đánh giá khoảng cách giá hiện tại đến Entry
         dist = abs(signal['price'] - signal['entry']) / signal['entry'] * 100
         dist_status = f"Cách Entry {dist:.2f}%"
         if dist < 0.1:
@@ -298,7 +296,6 @@ class ExecutionAgent:
             
         stars = "⭐" * signal['score']
         
-        # MỞ DẤU 3 NHÁY KÉP
         msg = f"""
 {icon} <b>SMC SIGNAL {TIMEFRAME} | {symbol}</b>
 ───────────────
@@ -316,8 +313,6 @@ class ExecutionAgent:
 
 <b>Giá hiện tại:</b> {signal['price']:.4f}
 """
-        # ĐÓNG DẤU 3 NHÁY KÉP Ở TRÊN ^^ (Lỗi của bạn nằm ở đây)
-
         for chat_id in CHAT_IDS:
             try:
                 url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -326,3 +321,41 @@ class ExecutionAgent:
                     print(f"Lỗi khi gửi cho ID {chat_id}: {response.text}")
             except Exception as e:
                 print(f"Lỗi gửi Tele đến {chat_id}: {e}")
+
+# ==========================================
+# --- 6. HỆ THỐNG VẬN HÀNH CHÍNH (MAIN) ---
+# ==========================================
+def main():
+    run_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{run_time}] Khởi chạy Bot SMC Signal Đa Tác Vụ...")
+    
+    state_manager = GistStateManager()
+    regime_agent = MarketRegimeAgent(exchange)
+    signal_agent = SignalAgent()
+    execution_agent = ExecutionAgent()
+    
+    signals_found = 0
+
+    for symbol in PAIRS:
+        df = regime_agent.get_data(symbol, TIMEFRAME)
+        if df is None:
+            continue
+            
+        trend = regime_agent.analyze_trend(df)
+        print(f"[{symbol}] Đang quét... Trend 4H/1D: {trend}")
+        
+        signal = signal_agent.scan_for_setups(symbol, df, trend, state_manager)
+        
+        if signal:
+            signals_found += 1
+            print(f">>> Vừa nổ tín hiệu {signal['score']} SAO cho {symbol}. Đang gửi Telegram...")
+            execution_agent.send_telegram(symbol, signal)
+            
+    if signals_found == 0:
+        print("Không có tín hiệu nào thỏa mãn lúc này.")
+        
+    if ENABLE_HEARTBEAT:
+        print(f"[{run_time}] Hệ thống vẫn đang chạy ổn định (Heartbeat OK).")
+
+if __name__ == "__main__":
+    main()
