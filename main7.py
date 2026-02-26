@@ -71,15 +71,19 @@ class GistStateManager:
             "Authorization": f"token {self.github_token}", 
             "Accept": "application/vnd.github.v3+json"
         } if self.github_token else {}
-        self.state = self.load()
+        
+        # Load và ÉP KIỂU dứt khoát thành List
+        loaded_state = self.load()
+        self.state = loaded_state if isinstance(loaded_state, list) else []
         
     def load(self):
-        # Nếu không có Token GitHub, ưu tiên đọc file local (khi test trên máy tính)
+        # Nếu không có Token GitHub, ưu tiên đọc file local
         if not self.github_token or not self.gist_id:
             if os.path.exists(self.filename):
                 try:
                     with open(self.filename, 'r') as f:
-                        return json.load(f)
+                        data = json.load(f)
+                        return data if isinstance(data, list) else [] # Bảo vệ kiểu dữ liệu
                 except:
                     return []
             return []
@@ -91,7 +95,8 @@ class GistStateManager:
             if response.status_code == 200:
                 gist_data = response.json()
                 content = gist_data['files'].get(self.filename, {}).get('content', '[]')
-                return json.loads(content)
+                data = json.loads(content)
+                return data if isinstance(data, list) else [] # Bảo vệ kiểu dữ liệu
             else:
                 print(f"Không thể đọc Gist. Status Code: {response.status_code}")
         except Exception as e:
@@ -99,8 +104,13 @@ class GistStateManager:
         return []
 
     def save(self, new_item):
+        # Bảo vệ kép: Nếu vì lý do nào đó state bị lỗi, reset lại
+        if not isinstance(self.state, list):
+            self.state = []
+            
         self.state.append(new_item)
-        # Giới hạn bộ nhớ 50 setup gần nhất để file Gist không bị phình to
+        
+        # Giới hạn bộ nhớ 50 setup gần nhất
         if len(self.state) > 50:
             self.state.pop(0)
             
@@ -123,7 +133,6 @@ class GistStateManager:
                 print(f"Lỗi ghi Gist. Status Code: {response.status_code}")
         except Exception as e:
             print(f"Lỗi kết nối Gist (Save): {e}")
-
 # ==========================================
 # --- 3. MARKET REGIME AGENT ---
 # ==========================================
