@@ -103,7 +103,7 @@ def find_quality_zone(df, trend, atr):
                         if is_mitigated(df, i, trend, entry): continue
                         whale = df['vol'].iloc[i+1:i+5].max() > df['vol'].iloc[max(0,i-25):i].mean() * WHALE_VOL_MULTIPLIER
                         sweep = df['low'].iloc[i-6:i+1].min() < df['low'].iloc[i-15:i-6].min() if i > 15 else False
-                        return entry, sl, i, True, whale, sweep
+                        return entry, sl, i, True, whale, sweep   # True = has_fvg
         else:
             if df['close'].iloc[i] > df['open'].iloc[i]:
                 if is_strong_displacement(df, i + 1, "DOWN"):
