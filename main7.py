@@ -19,16 +19,14 @@ SL_ATR_MULTIPLIER = 1.8
 ENTRY_TOLERANCE = 0.6
 WHALE_VOL_MULTIPLIER = 1.8
 MIN_SCORE = 4
-MAX_BARS_LIMITS = {'15m': 35, '1h': 80, '4h': 55}
+MAX_BARS_LIMITS = {'15m': 35, '1h': 80, '4h': 55, '1d': 40}
 
 # ------------------------------------------
 # 🔴 CÔNG TẮC BỘ LỌC ÉP BUỘC (HARD FILTERS)
-# Nếu False: Chuyển sang chấm điểm mềm (Soft Score).
-# Nếu True: Thiếu điều kiện này là hủy lệnh luôn.
 # ------------------------------------------
-ENABLE_FILTER_VOLUME   = False  # Ép nến đẩy phải có Volume > WHALE_VOL_MULTIPLIER * AvgVol
-ENABLE_FILTER_SWEEP    = False  # Bắt buộc OB phải quét đỉnh/đáy 15 nến trước đó
-ENABLE_FILTER_PD_ARRAY = False  # Bắt buộc điểm vào lệnh phải nằm ở Premium/Discount hợp lý
+ENABLE_FILTER_VOLUME   = False  
+ENABLE_FILTER_SWEEP    = False  
+ENABLE_FILTER_PD_ARRAY = False  
 
 # ------------------------------------------
 # CÔNG TẮC HỆ THỐNG
@@ -74,12 +72,10 @@ class GistStateManager:
             "Accept": "application/vnd.github.v3+json"
         } if self.github_token else {}
         
-        # Load và ÉP KIỂU dứt khoát thành List để chống lỗi Dict append
         loaded_state = self.load()
         self.state = loaded_state if isinstance(loaded_state, list) else []
         
     def load(self):
-        # Nếu không có Token GitHub, ưu tiên đọc file local (khi test trên máy tính)
         if not self.github_token or not self.gist_id:
             if os.path.exists(self.filename):
                 try:
@@ -90,7 +86,6 @@ class GistStateManager:
                     return []
             return []
             
-        # Đọc dữ liệu từ GitHub Gist
         try:
             url = f"https://api.github.com/gists/{self.gist_id}"
             response = requests.get(url, headers=self.headers)
@@ -106,23 +101,19 @@ class GistStateManager:
         return []
 
     def save(self, new_item):
-        # Bảo vệ kép
         if not isinstance(self.state, list):
             self.state = []
             
         self.state.append(new_item)
         
-        # Giới hạn bộ nhớ 50 setup gần nhất để file Gist không bị phình to
         if len(self.state) > 50:
             self.state.pop(0)
             
-        # Nếu không có Token, lưu file local
         if not self.github_token or not self.gist_id:
             with open(self.filename, 'w') as f:
                 json.dump(self.state, f)
             return
             
-        # Ghi đè dữ liệu lên GitHub Gist
         try:
             url = f"https://api.github.com/gists/{self.gist_id}"
             payload = {
@@ -130,9 +121,7 @@ class GistStateManager:
                     self.filename: {"content": json.dumps(self.state)}
                 }
             }
-            response = requests.patch(url, headers=self.headers, json=payload)
-            if response.status_code != 200:
-                print(f"Lỗi ghi Gist. Status Code: {response.status_code}")
+            requests.patch(url, headers=self.headers, json=payload)
         except Exception as e:
             print(f"Lỗi kết nối Gist (Save): {e}")
 
@@ -150,7 +139,6 @@ class MarketRegimeAgent:
         
         # Cắt bỏ nến hiện tại đang chạy để chống Repainting
         df = df.iloc[:-1].copy() 
-        
         df['atr'] = self._calculate_atr(df)
         df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
         return df
@@ -166,13 +154,12 @@ class MarketRegimeAgent:
         if df is None or len(df) < 200: return "UNKNOWN"
         close, ema200 = df['close'].iloc[-1], df['ema200'].iloc[-1]
         
-        # Dùng buffer 0.2% lọc nhiễu sideway
         if close > ema200 * 1.002: return "UP"
         if close < ema200 * 0.998: return "DOWN"
         return "SIDEWAY"
 
 # ==========================================
-# --- 4. SIGNAL AGENT (Lõi SMC + Confirmation) ---
+# --- 4. SIGNAL AGENT (Lõi SMC + MTF) ---
 # ==========================================
 class SignalAgent:
     def __init__(self):
@@ -193,26 +180,23 @@ class SignalAgent:
         return False, None
 
     def check_confirmation(self, df, direction, ob_high, ob_low, ob_idx):
-        """Hàm kiểm tra xác nhận tại vùng POI"""
+        """Hàm kiểm tra xác nhận Sweep/Volume tại vùng POI"""
         latest_idx = len(df) - 1
         latest_candle = df.iloc[latest_idx]
 
-        # Kiểm tra từ lúc sinh ra OB đến hiện tại
         action_df = df.iloc[ob_idx+2 : latest_idx+1]
         if len(action_df) == 0: return False, None
 
-        # 1. Kiểm tra giá đã chạm vùng POI chưa và có bị phá vỡ hẳn không?
         if direction == "BUY":
             tapped = action_df['low'].min() <= ob_high
-            invalidated = action_df['close'].min() < ob_low # Đóng nến thủng OB -> Bỏ
+            invalidated = action_df['close'].min() < ob_low 
         else:
             tapped = action_df['high'].max() >= ob_low
-            invalidated = action_df['close'].max() > ob_high # Đóng nến qua OB -> Bỏ
+            invalidated = action_df['close'].max() > ob_high 
 
         if not tapped or invalidated:
             return False, None
 
-        # 2. Điều kiện nến xác nhận (Nến vừa đóng)
         body = abs(latest_candle['close'] - latest_candle['open'])
         total = latest_candle['high'] - latest_candle['low']
         if total == 0: return False, None
@@ -224,7 +208,6 @@ class SignalAgent:
         
         if direction == "BUY":
             lower_wick = min(latest_candle['open'], latest_candle['close']) - latest_candle['low']
-            # Xác nhận: Rút chân dài ở vùng dưới HOẶC nến xanh có Vol lớn
             is_sweep = latest_candle['low'] < ob_low and latest_candle['close'] >= ob_low
             if (lower_wick > body * 1.2 and has_vol) or is_sweep or (latest_candle['close'] > latest_candle['open'] and has_vol):
                 is_reversal = True
@@ -235,61 +218,93 @@ class SignalAgent:
                 is_reversal = True
 
         if is_reversal:
-            return True, latest_candle['close'] # Trả về giá Market để vào lệnh
+            return True, latest_candle['close'] 
             
         return False, None
 
-    def scan_for_setups(self, symbol, df, trend, state_manager):
-        if trend == "UNKNOWN": return None
+    def scan_mtf_setups(self, symbol, df_ltf, df_htf, ltf_str, htf_str, trend_htf, state_manager):
+        if trend_htf == "UNKNOWN": return None
 
-        atr = df['atr'].iloc[-1]
-        max_bars_lookback = MAX_BARS_LIMITS.get(TIMEFRAME, 50)
+        # --- BƯỚC 1: TÌM POI Ở KHUNG LỚN (HTF) ---
+        htf_pois = []
+        max_bars_htf = MAX_BARS_LIMITS.get(htf_str, 50)
         
-        for i in range(len(df) - max_bars_lookback, len(df) - 2):
+        for i in range(len(df_htf) - max_bars_htf, len(df_htf) - 2):
             direction = None
-            if trend in ["UP", "SIDEWAY"] and df['close'].iloc[i] < df['open'].iloc[i]: direction = "BUY"
-            elif trend in ["DOWN", "SIDEWAY"] and df['close'].iloc[i] > df['open'].iloc[i]: direction = "SELL"
+            if trend_htf in ["UP", "SIDEWAY"] and df_htf['close'].iloc[i] < df_htf['open'].iloc[i]: direction = "BUY"
+            elif trend_htf in ["DOWN", "SIDEWAY"] and df_htf['close'].iloc[i] > df_htf['open'].iloc[i]: direction = "SELL"
+            
+            if direction and self.check_displacement(df_htf, i+1, direction):
+                has_fvg, _ = self.check_fvg(df_htf, i)
+                if has_fvg:
+                    htf_pois.append({
+                        "dir": direction, 
+                        "high": df_htf['high'].iloc[i], 
+                        "low": df_htf['low'].iloc[i]
+                    })
+                    
+        if not htf_pois: return None # Không có cản cứng thì bỏ qua
 
-            if direction and self.check_displacement(df, i+1, direction):
-                has_fvg, fvg_dir = self.check_fvg(df, i)
+        # --- BƯỚC 2: TÌM POI KHUNG NHỎ (LTF) VÀ CHECK LỒNG NHAU ---
+        atr_ltf = df_ltf['atr'].iloc[-1]
+        max_bars_ltf = MAX_BARS_LIMITS.get(ltf_str, 35)
+        
+        for i in range(len(df_ltf) - max_bars_ltf, len(df_ltf) - 2):
+            direction = None
+            if trend_htf in ["UP", "SIDEWAY"] and df_ltf['close'].iloc[i] < df_ltf['open'].iloc[i]: direction = "BUY"
+            elif trend_htf in ["DOWN", "SIDEWAY"] and df_ltf['close'].iloc[i] > df_ltf['open'].iloc[i]: direction = "SELL"
+
+            if direction and self.check_displacement(df_ltf, i+1, direction):
+                has_fvg, fvg_dir = self.check_fvg(df_ltf, i)
                 if (direction == "BUY" and fvg_dir == "bullish") or (direction == "SELL" and fvg_dir == "bearish"):
                     
-                    ob_high, ob_low = df['high'].iloc[i], df['low'].iloc[i]
-                    setup_id = f"{symbol}_{df['ts'].iloc[i]}_{direction}"
+                    ob_high_ltf, ob_low_ltf = df_ltf['high'].iloc[i], df_ltf['low'].iloc[i]
                     
-                    # Trạng thái 1: Chưa báo WATCHING -> Báo để rình
+                    # Kiểm tra lồng nhau (Confluence)
+                    is_nested = False
+                    for poi in htf_pois:
+                        if poi['dir'] == direction:
+                            # POI LTF phải nằm đè lên hoặc lọt thỏm trong POI HTF
+                            if (ob_high_ltf <= poi['high'] and ob_high_ltf >= poi['low']) or \
+                               (ob_low_ltf >= poi['low'] and ob_low_ltf <= poi['high']):
+                                is_nested = True
+                                break
+                                
+                    if not is_nested:
+                        continue # Đẹp mà lơ lửng thì cũng bỏ
+
+                    setup_id = f"{symbol}_{df_ltf['ts'].iloc[i]}_{direction}_{ltf_str}"
                     watch_id = "WATCH_" + setup_id
                     exec_id = "EXEC_" + setup_id
                     
-                    # Tính SL nới rộng hơn chút cho an toàn
-                    sl = ob_low - (atr * 0.5) if direction == "BUY" else ob_high + (atr * 0.5)
+                    # Tính SL theo khung nhỏ (Tối ưu R:R)
+                    sl = ob_low_ltf - (atr_ltf * 0.5) if direction == "BUY" else ob_high_ltf + (atr_ltf * 0.5)
                     
-                    # Kiểm tra xem có nến xác nhận Market không
-                    is_confirmed, market_price = self.check_confirmation(df, direction, ob_high, ob_low, i)
+                    is_confirmed, market_price = self.check_confirmation(df_ltf, direction, ob_high_ltf, ob_low_ltf, i)
 
                     if is_confirmed:
                         if ENABLE_ORDER_ANTISPAM and exec_id in state_manager.state:
-                            continue # Đã bắn lệnh rồi thì thôi
+                            continue 
                             
-                        # Tính TP theo R:R thực tế từ giá Market
                         risk = abs(market_price - sl)
                         tp1 = market_price + risk * 1.5 if direction == "BUY" else market_price - risk * 1.5
-                        tp2 = market_price + risk * 2.5 if direction == "BUY" else market_price - risk * 2.5
+                        tp2 = market_price + risk * 3.0 if direction == "BUY" else market_price - risk * 3.0
                         
                         state_manager.save(exec_id)
                         return {
                             "type": "EXECUTION", "direction": direction, "market_price": market_price,
-                            "ob_high": ob_high, "ob_low": ob_low, "sl": sl, "tp1": tp1, "tp2": tp2,
-                            "signal_name": f"{'Bullish' if direction=='BUY' else 'Bearish'} Confirmed Entry"
+                            "ob_high": ob_high_ltf, "ob_low": ob_low_ltf, "sl": sl, "tp1": tp1, "tp2": tp2,
+                            "signal_name": f"{'Bullish' if direction=='BUY' else 'Bearish'} Confirmed Entry",
+                            "ltf": ltf_str, "htf": htf_str
                         }
                     
                     elif not is_confirmed and (watch_id not in state_manager.state):
-                        # Gửi cảnh báo theo dõi nếu chưa gửi
                         state_manager.save(watch_id)
                         return {
                             "type": "WATCHING", "direction": direction, 
-                            "ob_high": ob_high, "ob_low": ob_low,
-                            "signal_name": f"Dò thấy {'Bullish' if direction=='BUY' else 'Bearish'} POI"
+                            "ob_high": ob_high_ltf, "ob_low": ob_low_ltf,
+                            "signal_name": f"Dò thấy {'Bullish' if direction=='BUY' else 'Bearish'} POI (Nested)",
+                            "ltf": ltf_str, "htf": htf_str
                         }
         return None
 
@@ -300,22 +315,26 @@ class ExecutionAgent:
     def send_telegram(self, symbol, signal):
         if not TELEGRAM_TOKEN or "ĐIỀN" in TELEGRAM_TOKEN: return
 
+        ltf, htf = signal.get('ltf'), signal.get('htf')
+
         if signal['type'] == "WATCHING":
             icon = "👀"
             msg = f"""
-{icon} <b>SMC WATCHING | {symbol} {TIMEFRAME}</b>
+{icon} <b>SMC WATCHING | {symbol}</b>
 ───────────────
+<b>Khung đánh:</b> {ltf} (Bảo kê bởi {htf})
 <b>Trạng thái:</b> Đang rình vùng POI
 <b>Action:</b> Canh {signal['direction']}
 <b>Vùng quét (OB):</b> {signal['ob_low']:.4f} - {signal['ob_high']:.4f}
 
-<i>*Bot sẽ tự động bắn lệnh Market nếu xuất hiện nến xác nhận có Volume / Sweep tại vùng này. Giữ im lặng...</i>
+<i>*Bot sẽ tự động bắn lệnh Market nếu xuất hiện nến xác nhận tại vùng này. Giữ im lặng...</i>
 """
         else:
             icon = "🚀" if signal['direction'] == "BUY" else "💥"
             msg = f"""
-{icon} <b>SMC MARKET EXECUTION | {symbol} {TIMEFRAME}</b>
+{icon} <b>SMC MARKET EXECUTION | {symbol}</b>
 ───────────────
+<b>Khung đánh:</b> {ltf} (Bảo kê bởi {htf})
 <b>Xác nhận:</b> Volume/Sweep đảo chiều thành công!
 <b>Action:</b> VÀO LỆNH MARKET {signal['direction']} NGAY
 
@@ -323,14 +342,14 @@ class ExecutionAgent:
 <b>Stoploss:</b> {signal['sl']:.4f}
 ───────────────
 <b>🎯 TP1 (RR 1:1.5):</b> {signal['tp1']:.4f}
-<b>🎯 TP2 (RR 1:2.5):</b> {signal['tp2']:.4f}
+<b>🎯 TP2 (RR 1:3.0):</b> {signal['tp2']:.4f}
 """
         
         for chat_id in CHAT_IDS:
             try:
                 url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
                 requests.post(url, json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"})
-            except Exception as e:
+            except Exception:
                 pass
 
     def send_text(self, text):
@@ -341,10 +360,8 @@ class ExecutionAgent:
             try:
                 url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
                 response = requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
-                if response.status_code != 200:
-                    print(f"Lỗi khi gửi text cho ID {chat_id}: {response.text}")
-            except Exception as e:
-                print(f"Lỗi gửi Tele text đến {chat_id}: {e}")
+            except Exception:
+                pass
 
 # ==========================================
 # --- 6. HỆ THỐNG VẬN HÀNH CHÍNH (MAIN) ---
@@ -361,29 +378,35 @@ def main():
     signals_found = 0
 
     for symbol in PAIRS:
-        df = regime_agent.get_data(symbol, TIMEFRAME)
-        if df is None:
-            continue
+        for ltf in TIMEFRAMES:
+            htf = MTF_MAPPING.get(ltf)
+            if not htf: continue
             
-        trend = regime_agent.analyze_trend(df)
-        print(f"[{symbol}] Đang quét... Trend 4H/1D: {trend}")
-        
-        signal = signal_agent.scan_for_setups(symbol, df, trend, state_manager)
-        
-        if signal:
-            signals_found += 1
-            if signal['type'] == 'WATCHING':
-                print(f">>> [MỚI] Dò thấy vùng POI cho {symbol}. Đưa vào danh sách theo dõi.")
-            else:
-                print(f">>> [XÁC NHẬN] Có tín hiệu đảo chiều {symbol}. Bắn lệnh Market ngay!")
+            df_ltf = regime_agent.get_data(symbol, ltf)
+            df_htf = regime_agent.get_data(symbol, htf)
+            
+            if df_ltf is None or df_htf is None:
+                continue
                 
-            execution_agent.send_telegram(symbol, signal)
+            trend_htf = regime_agent.analyze_trend(df_htf)
+            print(f"[{symbol} | {ltf}/{htf}] Đang quét... Trend {htf}: {trend_htf}")
             
+            signal = signal_agent.scan_mtf_setups(symbol, df_ltf, df_htf, ltf, htf, trend_htf, state_manager)
+            
+            if signal:
+                signals_found += 1
+                if signal['type'] == 'WATCHING':
+                    print(f">>> [MỚI] Dò thấy vùng POI cho {symbol} ({ltf}). Đưa vào danh sách theo dõi.")
+                else:
+                    print(f">>> [XÁC NHẬN] Có tín hiệu đảo chiều {symbol} ({ltf}). Bắn lệnh Market ngay!")
+                    
+                execution_agent.send_telegram(symbol, signal)
+                
     if signals_found == 0:
         print("Không có tín hiệu nào thỏa mãn lúc này.")
         
     if ENABLE_HEARTBEAT:
-        heartbeat_msg = f"⏱ <b>[{run_time}]</b> Hệ thống SMC Bot vẫn đang hoạt động ổn định."
+        heartbeat_msg = f"⏱ <b>[{run_time}]</b> Hệ thống SMC MTF Bot vẫn đang hoạt động ổn định."
         print(heartbeat_msg)
         execution_agent.send_text(heartbeat_msg)
 
