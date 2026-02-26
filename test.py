@@ -9,7 +9,6 @@ from functools import wraps
 # --- 1. CẤU HÌNH ---
 # ==========================================
 PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
-MTF_MAPPING = {'1h': '4h'}
 SL_ATR_MULTIPLIER = 1.8
 ENTRY_TOLERANCE = 0.6
 WHALE_VOL_MULTIPLIER = 1.8
@@ -103,7 +102,7 @@ def find_quality_zone(df, trend, atr):
                         if is_mitigated(df, i, trend, entry): continue
                         whale = df['vol'].iloc[i+1:i+5].max() > df['vol'].iloc[max(0,i-25):i].mean() * WHALE_VOL_MULTIPLIER
                         sweep = df['low'].iloc[i-6:i+1].min() < df['low'].iloc[i-15:i-6].min() if i > 15 else False
-                        return entry, sl, i, True, whale, sweep   # True = has_fvg
+                        return entry, sl, i, True, whale, sweep
         else:
             if df['close'].iloc[i] > df['open'].iloc[i]:
                 if is_strong_displacement(df, i + 1, "DOWN"):
@@ -180,8 +179,8 @@ if __name__ == "__main__":
             if htf_trend == "SIDEWAY": continue
 
             atr = current_df['atr'].iloc[-1]
-            entry, sl, ob_idx, has_fvg, has_whale, has_sweep = find_quality_zone(current_df, htf_trend, atr)
-            if not has_fvg or entry == 0: continue
+            entry, sl, ob_idx, fvg_found, has_whale, has_sweep = find_quality_zone(current_df, htf_trend, atr)
+            if not fvg_found or entry == 0: continue
 
             risk = abs(entry - sl)
             score = 4
