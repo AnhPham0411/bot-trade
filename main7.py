@@ -16,7 +16,7 @@ MTF_MAPPING = {'15m': '1h', '1h': '4h', '4h': '1d'}
 MAX_BARS_LIMITS = {'15m': 40, '1h': 80, '4h': 60, '1d': 45}
 
 MIN_SCORE_ALERT = 4.0
-MIN_SCORE_EXECUTE = 5.5
+MIN_SCORE_EXECUTE = 4.5
 ENABLE_ORDER_ANTISPAM = True
 ENABLE_HEARTBEAT = True
 AGGRESSIVE_MODE = True          # True = entry nhanh hơn
