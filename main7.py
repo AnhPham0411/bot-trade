@@ -19,7 +19,7 @@ MIN_SCORE_ALERT = 4.0
 MIN_SCORE_EXECUTE = 5.5
 ENABLE_ORDER_ANTISPAM = True
 ENABLE_HEARTBEAT = True
-AGGRESSIVE_MODE = False          # True = entry nhanh hơn
+AGGRESSIVE_MODE = True          # True = entry nhanh hơn
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 user_chat_id = os.getenv('TELEGRAM_CHAT_ID')
