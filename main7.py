@@ -6,10 +6,9 @@ import time
 import ccxt
 import json
 from datetime import datetime
-from functools import wraps
 
 # ======================================================================
-# --- 1. USER CONFIGURATIONS ---
+# --- 1. USER CONFIGURATIONS (ONE-SHOT MODE) ---
 # ======================================================================
 PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
 TIMEFRAMES = ['15m', '1h', '4h']
@@ -20,8 +19,7 @@ MIN_SCORE_ALERT = 4.0
 MIN_SCORE_EXECUTE = 5.5
 ENABLE_ORDER_ANTISPAM = True
 ENABLE_HEARTBEAT = True
-AGGRESSIVE_MODE = True          # True = entry nhanh hơn
-HEARTBEAT_INTERVAL = 3000        # 60 phút (giảm spam Telegram)
+AGGRESSIVE_MODE = False          # True = entry nhanh hơn
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 user_chat_id = os.getenv('TELEGRAM_CHAT_ID')
@@ -31,23 +29,7 @@ CHAT_IDS = [cid for cid in [user_chat_id, group_chat_id] if cid]
 exchange = ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
 
 # ======================================================================
-# --- 2. UTILS ---
-# ======================================================================
-def retry_api(retries=3, delay=2):
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            for _ in range(retries):
-                try: return func(*args, **kwargs)
-                except Exception as e:
-                    print(f"Lỗi API: {e}. Thử lại sau {delay}s...")
-                    time.sleep(delay)
-            return None
-        return wrapper
-    return decorator
-
-# ======================================================================
-# --- 3. STATE MANAGER (ĐÃ FIX AN TOÀN 100%) ---
+# --- 2. STATE MANAGER (An toàn 100%) ---
 # ======================================================================
 class GistStateManager:
     def __init__(self, filename='bot_state.json'):
@@ -73,20 +55,23 @@ class GistStateManager:
             print(f"Lỗi save state: {e}")
 
 # ======================================================================
-# --- 4. MARKET REGIME AGENT ---
+# --- 3. MARKET REGIME AGENT ---
 # ======================================================================
 class MarketRegimeAgent:
     def __init__(self, exchange_api):
         self.exchange = exchange_api
 
-    @retry_api()
     def get_data(self, symbol, timeframe, limit=300):
-        bars = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-        df = pd.DataFrame(bars, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-        df = df.iloc[:-1].copy()
-        df['atr'] = self._calculate_atr(df)
-        df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
-        return df
+        try:
+            bars = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+            df = pd.DataFrame(bars, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+            df = df.iloc[:-1].copy()
+            df['atr'] = self._calculate_atr(df)
+            df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
+            return df
+        except Exception as e:
+            print(f"Lỗi lấy data {symbol} {timeframe}: {e}")
+            return None
 
     def _calculate_atr(self, df, length=14):
         hl = df['high'] - df['low']
@@ -96,14 +81,14 @@ class MarketRegimeAgent:
         return tr.rolling(length).mean()
 
     def analyze_trend(self, df):
-        if len(df) < 200: return "UNKNOWN"
+        if df is None or len(df) < 200: return "UNKNOWN"
         close, ema = df['close'].iloc[-1], df['ema200'].iloc[-1]
         if close > ema * 1.002: return "UP"
         if close < ema * 0.998: return "DOWN"
         return "SIDEWAY"
 
 # ======================================================================
-# --- 5. SIGNAL AGENT (Giữ nguyên logic mạnh, đã fix volume) ---
+# --- 4. SIGNAL AGENT (Giữ nguyên logic mạnh) ---
 # ======================================================================
 class SignalAgent:
     def __init__(self):
@@ -284,7 +269,7 @@ class SignalAgent:
         return None
 
 # ======================================================================
-# --- 6. EXECUTION AGENT ---
+# --- 5. EXECUTION AGENT ---
 # ======================================================================
 class ExecutionAgent:
     def send_telegram(self, symbol, signal):
@@ -292,7 +277,7 @@ class ExecutionAgent:
         icon = "🚀" if signal['direction'] == "BUY" else "💥"
         setups = " + ".join(signal['active_setups'])
         msg = f"""
-{icon} <b>SMC PRO v2.2 (24/7 Ready) | {symbol}</b>
+{icon} <b>SMC PRO v2.3 (One-Shot) | {symbol}</b>
 ───────────────
 <b>Khung:</b> {signal['ltf']} (HTF: {signal['htf']})
 <b>Score:</b> {signal['score']}/12.5 ⭐
@@ -321,56 +306,54 @@ class ExecutionAgent:
             except: pass
 
 # ======================================================================
-# --- 7. MAIN – CHẠY 24/7 ỔN ĐỊNH (ĐÃ FIX 3 LỖI) ---
+# --- 6. MAIN – ONE-SHOT (Chạy 1 lần rồi kết thúc) ---
 # ======================================================================
 def main():
+    print("🚀 Bot SMC PRO v2.3 (One-Shot Mode) bắt đầu quét...")
+    run_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
     state_manager = GistStateManager()
     regime_agent = MarketRegimeAgent(exchange)
     signal_agent = SignalAgent()
     execution_agent = ExecutionAgent()
 
-    print("🚀 Bot SMC PRO v2.2 (Production Ready) đã khởi động - Chạy 24/7")
-    last_heartbeat = time.time()
+    signals_found = 0
+    total_scans = 0
 
-    while True:
-        run_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        signals_found = 0
+    for symbol in PAIRS:
+        for ltf in TIMEFRAMES:
+            htf = MTF_MAPPING.get(ltf)
+            if not htf: continue
 
-        for symbol in PAIRS:
-            for ltf in TIMEFRAMES:
-                htf = MTF_MAPPING.get(ltf)
-                if not htf: continue
+            df_ltf = regime_agent.get_data(symbol, ltf)
+            time.sleep(0.7)   # Ngăn MEXC block IP
+            df_htf = regime_agent.get_data(symbol, htf)
+            time.sleep(0.7)
 
-                df_ltf = regime_agent.get_data(symbol, ltf)
-                time.sleep(0.7)                     # ← FIX 3: Ngăn MEXC block IP
-                df_htf = regime_agent.get_data(symbol, htf)
-                time.sleep(0.7)
+            if df_ltf is None or df_htf is None or len(df_ltf) < 50:
+                continue
 
-                if df_ltf is None or df_htf is None or len(df_ltf) < 50:
-                    continue
+            total_scans += 1
+            trend_htf = regime_agent.analyze_trend(df_htf)
+            print(f"[{run_time}] [{symbol} | {ltf}/{htf}] Trend {htf}: {trend_htf} | Quét...")
 
-                trend_htf = regime_agent.analyze_trend(df_htf)
-                print(f"[{run_time}] [{symbol} | {ltf}/{htf}] Trend {htf}: {trend_htf} | Quét...")
+            signal = signal_agent.scan_mtf_setups(symbol, df_ltf, df_htf, ltf, htf, trend_htf, state_manager)
 
-                signal = signal_agent.scan_mtf_setups(symbol, df_ltf, df_htf, ltf, htf, trend_htf, state_manager)
+            if signal and signal['type'] == 'EXECUTION':
+                signals_found += 1
+                print(f">>> [XÁC NHẬN] 🚀 {symbol} ({ltf}) - Score: {signal['score']} | {signal['active_setups']}")
+                execution_agent.send_telegram(symbol, signal)
 
-                if signal and signal['type'] == 'EXECUTION':
-                    signals_found += 1
-                    print(f">>> [XÁC NHẬN] 🚀 {symbol} ({ltf}) - Score: {signal['score']} | {signal['active_setups']}")
-                    execution_agent.send_telegram(symbol, signal)
+    # Heartbeat + Báo cáo tóm tắt (chỉ 1 lần)
+    if ENABLE_HEARTBEAT:
+        heartbeat = f"✅ [{run_time}] Bot SMC PRO v2.3 (One-Shot) đã quét xong\n• Quét {total_scans} khung thời gian\n• Tìm thấy {signals_found} tín hiệu chất lượng cao"
+        print(heartbeat)
+        execution_agent.send_text(heartbeat)
 
-        # Heartbeat chỉ mỗi 60 phút
-        if ENABLE_HEARTBEAT and (time.time() - last_heartbeat > HEARTBEAT_INTERVAL):
-            heartbeat = f"⏱ [{run_time}] Bot SMC PRO v2.2 đang chạy ổn định • {signals_found} tín hiệu vừa quét"
-            print(heartbeat)
-            execution_agent.send_text(heartbeat)
-            last_heartbeat = time.time()
+    if signals_found == 0:
+        print(f"[{run_time}] Không có tín hiệu nào thỏa mãn lúc này.")
 
-        if signals_found == 0:
-            print(f"[{run_time}] Không có tín hiệu mới.")
-
-        print("-" * 90)
-        time.sleep(60)   # Vòng lặp chính 60 giây
+    print("🏁 Bot đã hoàn thành quét và tự động kết thúc (One-Shot Mode).")
 
 if __name__ == "__main__":
     main()
