@@ -20,8 +20,8 @@ MIN_SCORE_ALERT = 4.0
 MIN_SCORE_EXECUTE = 5.5
 ENABLE_ORDER_ANTISPAM = True
 ENABLE_HEARTBEAT = True
-AGGRESSIVE_MODE = False          # True = entry nhanh hơn
-HEARTBEAT_INTERVAL = 3600        # 60 phút (giảm spam Telegram)
+AGGRESSIVE_MODE = True          # True = entry nhanh hơn
+HEARTBEAT_INTERVAL = 3000        # 60 phút (giảm spam Telegram)
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 user_chat_id = os.getenv('TELEGRAM_CHAT_ID')
