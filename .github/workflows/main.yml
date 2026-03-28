@@ -39,12 +39,12 @@ jobs:
     #   run: python main3.py
 
     # # --- CHẠY BOT 2 (Chiến thuật cũ 2) --- unicorn setup
-    - name: Run Trading Bot 2
-      continue-on-error: true
-      env:
-        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN_1 }}
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      run: python main4.py
+    # - name: Run Trading Bot 2
+    #   continue-on-error: true
+    #   env:
+    #     TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN_1 }}
+    #     TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    #   run: python main4.py
 
     # # --- CHẠY BOT 3 (SMC PRO LIMIT - main3.py) ---
     # - name: Run Trading Bot 3
@@ -55,14 +55,14 @@ jobs:
     #   run: python main5.py
 
     # --- CHẠY BOT 3 (SMC PRO LIMIT - main5.py) ---
-    - name: Run Trading Bot 4
-      continue-on-error: true
-      env:
-        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN_1 }}
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        GH_GIST_TOKEN: ${{ secrets.GH_GIST_TOKEN }} # Cấp quyền cho Gist
-        GIST_ID: ${{ secrets.GIST_ID }}             # ID của file Gist
-      run: python main6.py
+    # - name: Run Trading Bot 4
+    #   continue-on-error: true
+    #   env:
+    #     TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN_1 }}
+    #     TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    #     GH_GIST_TOKEN: ${{ secrets.GH_GIST_TOKEN }} # Cấp quyền cho Gist
+    #     GIST_ID: ${{ secrets.GIST_ID }}             # ID của file Gist
+    #   run: python main6.py
 
     # --- CHẠY BOT 5 (unicorn update) ---
     - name: Run Trading Bot 5
@@ -72,6 +72,6 @@ jobs:
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         GH_GIST_TOKEN: ${{ secrets.GH_GIST_TOKEN }} # Cấp quyền cho Gist
         GIST_ID: ${{ secrets.GIST_ID }}             # ID của file Gist
-      run: python main7.py
+      run: python main8.py
 
 
