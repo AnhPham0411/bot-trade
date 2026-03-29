@@ -4,26 +4,31 @@ import ccxt
 import requests
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # ======================================================================
-# --- 1. CẤU HÌNH BOT LIVE (OPTIMIZED HIGH FREQUENCY) ---
+# --- 1. CẤU HÌNH BOT ULTRA MTF (5m, 15m, 1h) ---
 # ======================================================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
-MIN_SCORE_EXECUTE = 3.5  # Đã tối ưu để có tần suất lệnh cao (~1 lệnh/ngày/cặp)
-ENABLE_KILLZONES = False  # Đã tắt để đánh 24/7 theo yêu cầu tăng số lệnh
+TIMEFRAMES = {
+    '5m': '1h',    # Entry 5m -> Trend 1h
+    '15m': '1h',   # Entry 15m -> Trend 1h
+    '1h': '4h'     # Entry 1h -> Trend 4h
+}
 
-# Tham số tối ưu từ Backtest 180 ngày (Winrate ~47% Adj, Lợi nhuận +300% / 6 tháng)
+MIN_SCORE_EXECUTE = 3.5 
+
+# Tham số tối ưu từ Backtest 180 ngày MTF
 PARAMS = {
-    'sl_atr_mult': 0.4,     # SL cực chặt đã kiểm chứng qua 6 tháng
-    'min_fvg_atr': 0.5,     # Chấp nhận FVG nhỏ để tăng tần suất
-    'min_disp_atr': 0.8,    # Displacement vừa đủ để bắt sóng sớm
-    'ote_low': 0.62,        # Vùng OTE rộng
+    'sl_atr_mult': 0.4,
+    'min_fvg_atr': 0.5,
+    'min_disp_atr': 0.8,
+    'ote_low': 0.62,
     'ote_high': 0.79,
-    'tp2_rr': 1.5           # Mục tiêu TP2 thực tế nhất cho 15m
+    'tp2_rr': 1.5
 }
 
 exchange = ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
@@ -121,65 +126,64 @@ def fetch_data(symbol, tf, limit=300):
     except: return None
 
 def main():
-    print(f"[{datetime.now()}] 🚀 Khởi chạy SMC ULTRA Screener (High Frequency)...")
+    print(f"[{datetime.now()}] 🚀 Khởi chạy ULTRA MTF (Multi-Timeframe)...")
     agent = SMC_PA_Agent()
 
     for symbol in PAIRS:
-        df_15m = fetch_data(symbol, '15m')
-        df_1h = fetch_data(symbol, '1h')
-        if df_15m is None or df_1h is None: continue
+        # Cache HTF data
+        dfs = {tf: fetch_data(symbol, tf) for tf in ['5m', '15m', '1h', '4h']}
+        
+        for ltf, htf in TIMEFRAMES.items():
+            df_ltf = dfs[ltf]
+            df_htf = dfs[htf]
+            if df_ltf is None or df_htf is None: continue
 
-        # Xu hướng HTF 1H
-        last_1h = df_1h.iloc[-1]
-        trend = "UP" if last_1h['close'] > last_1h['ema200'] else "DOWN"
+            last_htf = df_htf.iloc[-1]
+            trend = "UP" if last_htf['close'] > last_htf['ema200'] else "DOWN"
 
-        # Quét setup ở các nến gần đây (15m)
-        for i in range(len(df_15m) - 6, len(df_15m) - 2):
-            direction = "BUY" if trend == "UP" else "SELL"
-            atr = df_15m['atr'].iloc[i]
-            
-            has_fvg, fvg_dir, fvg_bottom, fvg_top = agent.check_fvg(df_15m, i)
-            if not has_fvg or ((direction=="BUY" and fvg_dir!="bullish") or (direction=="SELL" and fvg_dir!="bearish")): continue
-            
-            # Check displacement ngay sau OB
-            if not agent.check_strong_displacement(df_15m, i+1, direction, atr): continue
-            
-            score, active = agent.calculate_setup_score(df_15m, i, direction, fvg_top, fvg_bottom, atr)
-            
-            if score >= MIN_SCORE_EXECUTE:
-                # Kiểm tra xem nến hiện tại đã chạm vùng chưa
-                action_df = df_15m.iloc[i+3:]
-                touched = (action_df['low'].min() <= fvg_top if direction=="BUY" else action_df['high'].max() >= fvg_bottom)
+            for i in range(len(df_ltf) - 6, len(df_ltf) - 2):
+                direction = "BUY" if trend == "UP" else "SELL"
+                atr = df_ltf['atr'].iloc[i]
                 
-                if touched:
-                    # Báo lệnh Telegram
-                    entry = fvg_top if direction=="BUY" else fvg_bottom
-                    ob_low, ob_high = df_15m['low'].iloc[i], df_15m['high'].iloc[i]
-                    sl = (min(ob_low, fvg_bottom) - atr * PARAMS['sl_atr_mult']) if direction=="BUY" else \
-                         (max(ob_high, fvg_top) + atr * PARAMS['sl_atr_mult'])
-                    risk = abs(entry - sl)
-                    tp1, tp2 = (entry + risk, entry + risk * PARAMS['tp2_rr']) if direction=="BUY" else (entry - risk, entry - risk * PARAMS['tp2_rr'])
-                    
-                    msg = (
-                        f"🔥 <b>SMC ULTRA PA (Score: {score})</b> 🔥\n"
-                        f"🪙 <b>Cặp:</b> {symbol} (15m)\n"
-                        f"📈 <b>Hướng:</b> {direction} MARKET\n"
-                        f"-----------------\n"
-                        f"🎯 <b>Entry:</b> <code>{entry:.5f}</code>\n"
-                        f"🛑 <b>Stoploss:</b> <code>{sl:.5f}</code>\n"
-                        f"💰 <b>TP1 (1R - Chốt 50% & BE):</b> <code>{tp1:.5f}</code>\n"
-                        f"💰 <b>TP2 (Đích 2R):</b> <code>{tp2:.5f}</code>\n"
-                        f"-----------------\n"
-                        f"🔍 <b>Setups:</b>\n" + "\n".join([f"• {s}" for s in active])
-                    )
-                    send_telegram(msg)
-                    print(f"!!! PHÁT HIỆN SETUP {symbol} {direction} !!!")
-                    break # Chỉ báo 1 setup mới nhất cho mỗi cặp
-
-    print("✅ Hoàn tất quét chu kỳ.")
+                has_fvg, fvg_dir, fvg_bottom, fvg_top = agent.check_fvg(df_ltf, i)
+                if not has_fvg or ((direction=="BUY" and fvg_dir!="bullish") or (direction=="SELL" and fvg_dir!="bearish")): continue
+                if not agent.check_strong_displacement(df_ltf, i+1, direction, atr): continue
+                
+                score, active = agent.calculate_setup_score(df_ltf, i, direction, fvg_top, fvg_bottom, atr)
+                
+                if score >= MIN_SCORE_EXECUTE:
+                    action_df = df_ltf.iloc[i+3:]
+                    touched = (action_df['low'].min() <= fvg_top if direction=="BUY" else action_df['high'].max() >= fvg_bottom)
+                    if touched:
+                        # Tính toán mốc thời gian (UTC+7 - Giờ Việt Nam)
+                        now_vn = datetime.utcnow() + timedelta(hours=7)
+                        expiry_minutes = 60 if ltf == '5m' else (180 if ltf == '15m' else 720)
+                        expiry_time = (now_vn + timedelta(minutes=expiry_minutes)).strftime("%H:%M %d/%m")
+                        
+                        entry = fvg_top if direction=="BUY" else fvg_bottom
+                        sl = (min(df_ltf['low'].iloc[i], fvg_bottom) - atr * PARAMS['sl_atr_mult']) if direction=="BUY" else \
+                             (max(df_ltf['high'].iloc[i], fvg_top) + atr * PARAMS['sl_atr_mult'])
+                        risk = abs(entry - sl)
+                        tp1, tp2 = (entry + risk, entry + risk * PARAMS['tp2_rr']) if direction=="BUY" else (entry - risk, entry - risk * PARAMS['tp2_rr'])
+                        
+                        msg = (
+                            f"🌀 <b>SMC ULTRA MTF ({ltf})</b> 🌀\n"
+                            f"🪙 <b>Cặp:</b> {symbol}\n"
+                            f"📈 <b>Hướng:</b> {direction} MARKET\n"
+                            f"-----------------\n"
+                            f"🎯 <b>Entry:</b> <code>{entry:.5f}</code>\n"
+                            f"🛑 <b>Stoploss:</b> <code>{sl:.5f}</code>\n"
+                            f"💰 <b>TP1 (1R - 50% & BE):</b> <code>{tp1:.5f}</code>\n"
+                            f"💰 <b>TP2 ({PARAMS['tp2_rr']}R):</b> <code>{tp2:.5f}</code>\n"
+                            f"-----------------\n"
+                            f"🕛 <b>Bỏ lệnh sau:</b> <code>{expiry_time}</code> (Giờ VN)\n"
+                            f"⚠️ <i>Hủy nếu quét SL hoặc đạt TP trước khi khớp.</i>\n\n"
+                            f"🔍 <b>Setups:</b>\n" + "\n".join([f"• {s}" for s in active])
+                        )
+                        send_telegram(msg)
+                        print(f"!!! PHÁT HIỆN MTF {ltf} -> {symbol} {direction} !!!")
+                        break
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"Lỗi: {e}")
+    try: main()
+    except Exception as e: print(f"Lỗi: {e}")
