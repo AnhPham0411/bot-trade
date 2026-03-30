@@ -23,13 +23,14 @@ MIN_SCORE_EXECUTE = 3.5
 
 # Tham số tối ưu từ Backtest 180 ngày MTF
 PARAMS = {
-    'sl_atr_mult': 0.4,
+    'sl_atr_mult': 0.5,  # Tăng lên 0.5 để râu nến MEXC khó quét tới (Phát hiện sáng nay 0.4 là quá chặt).
     'min_fvg_atr': 0.5,
     'min_disp_atr': 0.8,
     'ote_low': 0.62,
     'ote_high': 0.79,
-    'tp2_rr': 1.5
+    'tp2_rr': 2.0        # Tăng lên 2.0R để bù lại các lệnh bị thoát ở hòa vốn (BE).
 }
+
 
 exchange = ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
 
